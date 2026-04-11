@@ -1,0 +1,137 @@
+"""
+项目配置模块
+
+从环境变量加载配置，支持多种 LLM 提供商
+"""
+
+import os
+from dataclasses import dataclass, field
+from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+@dataclass
+class LLMConfig:
+    """LLM 配置"""
+
+    provider: str = "ollama"
+    model: str = "qwen3.5:4b"
+    temperature: float = 0.7
+    base_url: str = "http://localhost:11434"
+    api_key: str = "ollama"
+
+
+@dataclass
+class SiliconFlowConfig:
+    """SiliconFlow 配置"""
+
+    base_url: str = "https://api.siliconflow.cn/v1"
+    api_key: Optional[str] = None
+    model: str = "Qwen/Qwen3.5-4B"
+
+
+@dataclass
+class LangSmithConfig:
+    """LangSmith 配置"""
+
+    api_key: Optional[str] = None
+    project_name: str = "kefu-agent"
+
+
+@dataclass
+class RedisConfig:
+    """Redis 配置"""
+
+    host: str = "localhost"
+    port: int = 6379
+    db: int = 0
+    password: Optional[str] = None
+
+
+@dataclass
+class EmbeddingConfig:
+    """嵌入模型配置"""
+
+    model: str = "bge-m3"
+    base_url: str = "http://localhost:11434"
+
+
+@dataclass
+class ChromaConfig:
+    """Chroma 向量库配置"""
+
+    persist_directory: str = "./data/chroma"
+
+
+@dataclass
+class ToolsConfig:
+    """工具配置"""
+
+    enabled: list[str] = field(
+        default_factory=lambda: ["query_order", "query_logistics", "transfer_to_human"]
+    )
+
+
+@dataclass
+class AppConfig:
+    """应用全局配置"""
+
+    llm_provider: str = "ollama"
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    siliconflow: SiliconFlowConfig = field(default_factory=SiliconFlowConfig)
+    langsmith: LangSmithConfig = field(default_factory=LangSmithConfig)
+    redis: RedisConfig = field(default_factory=RedisConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    chroma: ChromaConfig = field(default_factory=ChromaConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
+
+
+def load_config() -> AppConfig:
+    """从环境变量加载配置"""
+    # LLM 提供商：ollama / siliconflow
+    llm_provider = os.getenv("LLM_PROVIDER", "ollama").lower()
+
+    return AppConfig(
+        llm_provider=llm_provider,
+        llm=LLMConfig(
+            provider=llm_provider,
+            model=os.getenv("LLM_MODEL", "qwen3.5:4b"),
+            temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
+        ),
+        siliconflow=SiliconFlowConfig(
+            base_url=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
+            api_key=os.getenv("SILICONFLOW_API_KEY"),
+            model=os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen3.5-4B"),
+        ),
+        langsmith=LangSmithConfig(
+            api_key=os.getenv("LANGCHAIN_API_KEY"),
+            project_name=os.getenv("LANGCHAIN_PROJECT", "kefu-agent"),
+        ),
+        redis=RedisConfig(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            db=int(os.getenv("REDIS_DB", "0")),
+            password=os.getenv("REDIS_PASSWORD") or None,
+        ),
+        embedding=EmbeddingConfig(
+            model=os.getenv("EMBEDDING_MODEL", "bge-m3"),
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        ),
+        chroma=ChromaConfig(
+            persist_directory=os.getenv("CHROMA_DIR", "./chroma_db"),
+        ),
+        tools=ToolsConfig(
+            enabled=[
+                "query_order",
+                "query_logistics",
+                "transfer_to_human",
+            ]
+        ),
+    )
+
+
+config = load_config()

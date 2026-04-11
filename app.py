@@ -1,18 +1,38 @@
+"""
+智能客服 Web 界面
+
+基于 Streamlit 的聊天界面
+"""
+
 import streamlit as st
-from agent import run_agent
-from memory import get_memory
 from langchain_core.messages import HumanMessage
 
-st.set_page_config(page_title="智能客服", page_icon="🤖", layout="wide")
+from src.services.agent import run_agent
+from src.services.memory import get_memory
+from src.config.settings import config
+from src.config.logger import setup_logger
 
+# 初始化日志
+logger = setup_logger(name="kefu_agent", level=20)
+
+# 设置页面配置
+st.set_page_config(
+    page_title="智能客服",
+    page_icon="🤖",
+    layout="wide",
+)
+
+# 初始化会话 ID
 if "session_id" not in st.session_state:
     st.session_state.session_id = "default_session"
 
 
 def main():
+    """主函数"""
     st.title("🤖 智能客服")
     st.markdown("---")
 
+    # 显示对话历史
     memory = get_memory(st.session_state.session_id)
     history = memory.get_messages()
     for msg in history:
@@ -20,6 +40,7 @@ def main():
         with st.chat_message(role):
             st.markdown(msg.content)
 
+    # 用户输入
     if prompt := st.chat_input("请输入您的问题..."):
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -34,13 +55,15 @@ def main():
                     message_placeholder.markdown(full_response)
 
             except Exception as e:
+                logger.error(f"Agent error: {e}")
                 error_msg = f"抱歉，出现了一些问题：{str(e)}"
                 message_placeholder.markdown(error_msg)
 
+    # 侧边栏
     with st.sidebar:
         st.header("操作")
         if st.button("清空对话"):
-            from memory import clear_memory
+            from src.services.memory import clear_memory
 
             clear_memory(st.session_state.session_id)
             st.rerun()
@@ -53,6 +76,12 @@ def main():
         - 输入快递单号查询物流
         - 输入"转人工"转接客服
         """)
+
+        st.markdown("---")
+        st.header("配置信息")
+        st.markdown(f"- LLM 提供商: `{config.llm_provider}`")
+        st.markdown(f"- 模型: `{config.llm.model}`")
+        st.markdown(f"- 知识库: `{config.chroma.persist_directory}`")
 
 
 if __name__ == "__main__":
