@@ -1,276 +1,219 @@
-"""Agent 逻辑模块 - 使用 LangGraph 构建智能客服"""
 import os
-from typing import TypedDict, Annotated, Sequence
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
-from langchain_openai import ChatOpenAI
-from langchain_ollama import ChatOllama
+from typing import TypedDict, Annotated, Optional
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
+from langchain_ollama import ChatOllama
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-from tools import AVAILABLE_TOOLS, search_knowledge_base, query_order, query_logistics, transfer_to_human
-
-
-# 全局变量：RAG 检索器
-rag_retriever = None
-
-
-# LangSmith 配置
-LANGSMITH_API_KEY = "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"
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGCHAIN_PROJECT"] = "kefu-agent"
+from config import LLM_CONFIG, LANGSMITH_CONFIG
+from tools import query_order, query_logistics, transfer_to_human
+from memory import ChatMemory, get_memory
 
 
-# 模型配置
-class ModelConfig:
-    """模型配置类"""
-    
-    # 硅基流动 API 配置
-    SILICON_API_KEY = "sk-mkvwihbbwuvirgxkdfmonkonurkpucfvdwvbhcjqlswwpvbr"
-    SILICON_BASE_URL = "https://api.siliconflow.cn/v1"
-    SILICON_MODEL = "Qwen/Qwen2.5-4B-Instruct"
-    
-    # Ollama 本地配置
-    OLLAMA_BASE_URL = "http://localhost:11434"
-    OLLAMA_MODEL = "qwen2.5:4b"
-    OLLAMA_EMBED_MODEL = "bge-m3"
-
-
-def get_llm(use_local: bool = False):
-    """获取 LLM 实例
-    
-    Args:
-        use_local: 是否使用本地 Ollama 模型，False 使用硅基流动
-    
-    Returns:
-        LLM 实例
-    """
-    if use_local:
-        return ChatOllama(
-            base_url=ModelConfig.OLLAMA_BASE_URL,
-            model=ModelConfig.OLLAMA_MODEL,
-            temperature=0.7,
-            streaming=True
-        )
-    else:
-        return ChatOpenAI(
-            api_key=ModelConfig.SILICON_API_KEY,
-            base_url=ModelConfig.SILICON_BASE_URL,
-            model=ModelConfig.SILICON_MODEL,
-            temperature=0.7,
-            streaming=True
-        )
+os.environ["LANGSMITH_API_KEY"] = LANGSMITH_CONFIG["api_key"]
 
 
 class AgentState(TypedDict):
-    """Agent 状态定义"""
-    messages: Annotated[Sequence[BaseMessage], "对话历史"]
+    messages: Annotated[list[BaseMessage], "add_messages"]
+    session_id: str
+    should_transfer: Optional[bool]
+    tool_called: Optional[str]
 
 
-# System prompt
-SYSTEM_PROMPT = """你是一个智能客服助手，专门帮助用户解答问题和处理请求。
-
-## 重要约束
-1. 只回答与客服相关的问题，不要回答与客服无关的问题
-2. 严格不编造答案，不确定的问题要如实说明
-3. 如果知识库没有相关信息，明确告知用户
-4. 需要时使用工具查询真实信息，不要猜测
-
-## 可用工具
-- search_knowledge_base: 搜索知识库 FAQ
-- query_order: 查询订单信息（需要提供订单号）
-- query_logistics: 查询物流信息（需要提供快递单号）
-- transfer_to_human: 转接人工客服
-
-## 回复要求
-- 语气友好、专业
-- 回答简洁明了
-- 如果需要查询订单或物流，请明确告知用户需要提供订单号/快递单号
-- 如果问题无法解决，主动建议转接人工客服"""
+llm: Optional[ChatOllama] = None
 
 
-# 初始化 LLM 和绑定工具
-llm = get_llm(use_local=False)
-llm_with_tools = llm.bind_tools(AVAILABLE_TOOLS)
+def get_llm() -> ChatOllama:
+    global llm
+    if llm is None:
+        llm = ChatOllama(
+            model=LLM_CONFIG["model"],
+            base_url=LLM_CONFIG["base_url"],
+            temperature=LLM_CONFIG["temperature"],
+        )
+    return llm
 
 
-def should_continue(state: AgentState) -> bool:
-    """判断是否继续调用工具
-    
-    Returns:
-        "continue" 表示需要继续执行工具，"end" 表示直接响应
-    """
-    last_message = state["messages"][-1]
-    
-    # 如果最后一条消息有工具调用，继续执行工具
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        return "continue"
-    
-    # 如果最后一条消息是工具返回结果，也需要继续让 LLM 生成最终响应
-    if hasattr(last_message, "type") and last_message.type == "tool":
-        return "continue"
-    
-    return "end"
+def create_tools():
+    return [
+        {"name": "query_order", "description": "查询订单信息", "func": query_order},
+        {
+            "name": "query_logistics",
+            "description": "查询物流信息",
+            "func": query_logistics,
+        },
+        {
+            "name": "transfer_to_human",
+            "description": "转接人工客服",
+            "func": transfer_to_human,
+        },
+    ]
 
 
-def call_model(state: AgentState) -> AgentState:
-    """调用 LLM 生成响应
-    
-    Args:
-        state: 当前状态
-    
-    Returns:
-        更新后的状态
-    """
+SYSTEM_PROMPT = """你是一个智能客服助手，请严格遵守以下规则：
+1. 只能回答与客服相关的问题，不要回答无关问题
+2. 如果不知道答案，直接说不知道，不要编造
+3. 如果需要查询订单或物流，请使用工具
+4. 如果用户要求转接人工，使用工具
+5. 使用知识库回答常见问题
+6. 保持专业、礼貌的回答风格
+"""
+
+
+def should_use_tools(state: AgentState) -> str:
     messages = state["messages"]
-    
-    # 构建消息列表，插入 system prompt
-    if not any(isinstance(m, str) and "system" in str(type(m).__name__).lower() for m in messages):
-        full_messages = [HumanMessage(content=SYSTEM_PROMPT)] + list(messages)
+    last_message = messages[-1].content.lower()
+
+    keywords_order = ["订单", "订单号", "买的东西", "买了什么"]
+    keywords_logistics = ["物流", "快递", "发货", "运输", "到哪了"]
+    keywords_transfer = ["人工", "人工客服", "转人工", "转接人工"]
+
+    for keyword in keywords_transfer:
+        if keyword in last_message:
+            return "transfer"
+
+    for keyword in keywords_order:
+        if keyword in last_message:
+            return "query_order"
+
+    for keyword in keywords_logistics:
+        if keyword in last_message:
+            return "query_logistics"
+
+    return "respond"
+
+
+def query_order_node(state: AgentState) -> AgentState:
+    messages = state["messages"]
+    last_message = messages[-1].content
+
+    import re
+
+    order_id_match = re.search(r"\d{10,}", last_message)
+
+    if order_id_match:
+        order_id = order_id_match.group()
     else:
-        full_messages = list(messages)
-    
-    # 调用 LLM
-    response = llm_with_tools.invoke(full_messages)
-    
+        order_id = "default_order_id"
+
+    result = query_order(order_id)
+
+    response = f"根据查询结果，您的订单信息如下：{result}"
+
+    return {"messages": [AIMessage(content=response)], "tool_called": "query_order"}
+
+
+def query_logistics_node(state: AgentState) -> AgentState:
+    messages = state["messages"]
+    last_message = messages[-1].content
+
+    import re
+
+    order_id_match = re.search(r"\d{10,}", last_message)
+
+    if order_id_match:
+        order_id = order_id_match.group()
+    else:
+        order_id = "default_order_id"
+
+    result = query_logistics(order_id)
+
+    response = f"根据查询结果，您的物流信息如下：{result}"
+
+    return {"messages": [AIMessage(content=response)], "tool_called": "query_logistics"}
+
+
+def transfer_node(state: AgentState) -> AgentState:
+    messages = state["messages"]
+    messages_history = "\n".join([m.content for m in messages[:-1]])
+
+    result = transfer_to_human(
+        reason="用户请求转接人工客服", conversation_summary=messages_history[:500]
+    )
+
+    response = f"已为您转接人工客服，{result}"
+
+    return {
+        "messages": [AIMessage(content=response)],
+        "should_transfer": True,
+        "tool_called": "transfer_to_human",
+    }
+
+
+def chat_node(state: AgentState) -> AgentState:
+    messages = state["messages"]
+    session_id = state["session_id"]
+
+    memory = get_memory(session_id)
+    memory_variables = memory.load_memory_variables()
+
+    if memory_variables.get("history"):
+        history = "\n".join(
+            [
+                f"用户: {m.content}"
+                if isinstance(m, HumanMessage)
+                else f"客服: {m.content}"
+                for m in memory.get_messages()
+            ]
+        )
+        system_message = SystemMessage(
+            content=f"{SYSTEM_PROMPT}\n\n对话历史：\n{history}"
+        )
+    else:
+        system_message = SystemMessage(content=SYSTEM_PROMPT)
+
+    llm_instance = get_llm()
+
+    all_messages = [system_message] + messages
+
+    response = llm_instance.invoke(all_messages)
+
+    if not isinstance(response, BaseMessage):
+        response = AIMessage(content=str(response))
+
     return {"messages": [response]}
 
 
-def create_agent() -> StateGraph:
-    """创建 Agent 图
-    
-    Returns:
-        编译后的 Agent 图
-    """
-    # 创建图
-    workflow = StateGraph(AgentState)
-    
-    # 添加节点
-    workflow.add_node("llm", call_model)
-    workflow.add_node("tools", ToolNode(AVAILABLE_TOOLS))
-    
-    # 设置入口
-    workflow.set_entry_point("llm")
-    
-    # 添加边
-    workflow.add_conditional_edges(
-        "llm",
-        should_continue,
-        {
-            "continue": "tools",
-            "end": END
-        }
+def build_graph():
+    graph = StateGraph(AgentState)
+
+    graph.add_node("should_use_tools", lambda state: state)
+    graph.add_node("query_order", query_order_node)
+    graph.add_node("query_logistics", query_logistics_node)
+    graph.add_node("transfer", transfer_node)
+    graph.add_node("chat", chat_node)
+
+    graph.set_entry_point("should_use_tools")
+
+    graph.add_conditional_edges(
+        "should_use_tools",
+        lambda state: should_use_tools(state),
     )
-    
-    # 工具执行后返回 LLM
-    workflow.add_edge("tools", "llm")
-    
-    # 编译图
-    return workflow.compile()
+
+    graph.add_edge("query_order", END)
+    graph.add_edge("query_logistics", END)
+    graph.add_edge("transfer", END)
+    graph.add_edge("chat", END)
+
+    return graph.compile()
 
 
-# 创建 Agent 实例
-agent = create_agent()
+agent_graph = build_graph()
 
 
-def init_rag(knowledge_path: str = "knowledge"):
-    """初始化 RAG 知识库
-    
-    Args:
-        knowledge_path: 知识库文件路径
-    """
-    global rag_retriever
-    
-    try:
-        from langchain_ollama import OllamaEmbeddings
-        from langchain_community.vectorstores import Chroma
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
-        from langchain_community.document_loaders import TextLoader, MarkdownLoader
-        
-        # 嵌入模型
-        embedding_model = OllamaEmbeddings(
-            base_url=ModelConfig.OLLAMA_BASE_URL,
-            model=ModelConfig.OLLAMA_EMBED_MODEL
-        )
-        
-        # 加载知识库文档
-        documents = []
-        if os.path.exists(knowledge_path):
-            for filename in os.listdir(knowledge_path):
-                filepath = os.path.join(knowledge_path, filename)
-                if filename.endswith('.txt'):
-                    from langchain_community.document_loaders import TextLoader
-                    loader = TextLoader(filepath, encoding='utf-8')
-                elif filename.endswith('.md'):
-                    from langchain_community.document_loaders import MarkdownLoader
-                    loader = MarkdownLoader(filepath)
-                else:
-                    continue
-                
-                documents.extend(loader.load())
-        
-        if not documents:
-            print("未找到知识库文档")
-            return
-        
-        # 文档分割
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=100
-        )
-        splits = text_splitter.split_documents(documents)
-        
-        # 创建向量库
-        vectorstore = Chroma.from_documents(
-            documents=splits,
-            embedding=embedding_model,
-            collection_name="kefu-knowledge"
-        )
-        
-        rag_retriever = vectorstore.as_retriever(
-            search_type="similarity",
-            k=3
-        )
-        
-        print(f"知识库初始化完成，共加载 {len(splits)} 个文档片段")
-        
-    except Exception as e:
-        print(f"知识库初始化失败: {e}")
-        import traceback
-        traceback.print_exc()
+def run_agent(session_id: str, user_input: str):
+    memory = get_memory(session_id)
+    memory.add_user_message(user_input)
 
+    initial_state = {
+        "messages": [HumanMessage(content=user_input)],
+        "session_id": session_id,
+        "should_transfer": False,
+        "tool_called": None,
+    }
 
-def run_agent(user_input: str, history: list = None) -> str:
-    """运行 Agent 处理用户输入
-    
-    Args:
-        user_input: 用户输入
-        history: 对话历史
-    
-    Returns:
-        Agent 响应
-    """
-    # 构建消息历史
-    messages = []
-    
-    if history:
-        for msg in history:
-            if msg["role"] == "user":
-                messages.append(HumanMessage(content=msg["content"]))
-            elif msg["role"] == "assistant":
-                messages.append(AIMessage(content=msg["content"]))
-    
-    # 添加当前输入
-    messages.append(HumanMessage(content=user_input))
-    
-    # 运行 Agent
-    result = agent.invoke({"messages": messages})
-    
-    # 返回最后一条消息
-    return result["messages"][-1].content
+    result = agent_graph.invoke(initial_state)
 
+    response = result["messages"][-1].content
+    memory.add_ai_message(response)
 
-if __name__ == "__main__":
-    # 测试
-    init_rag()
-    response = run_agent("你好，我想咨询一下订单问题")
-    print(response)
+    return response
