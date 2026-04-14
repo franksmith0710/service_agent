@@ -21,8 +21,9 @@ Agent 服务模块
 """
 
 import os
+import json
 import logging
-from typing import Generator
+from typing import Generator, Any, Dict
 
 from langchain_core.messages import (
     BaseMessage,
@@ -82,6 +83,40 @@ from src.services.llm import get_llm_with_tools
 # ==================== 节点函数 ====================
 
 
+def transfer_node(state: AgentState) -> AgentState:
+    """
+    转人工节点
+    """
+    return {
+        "messages": [
+            AIMessage(
+                content="已为您转接人工客服，请稍候...\n人工客服工作时间: 周一至周五 9:00-18:00\n客服热线: 400-990-5898"
+            )
+        ]
+    }
+
+
+def chat_node(state: AgentState) -> AgentState:
+    """聊天节点 - 处理问候、闲聊、礼貌对话"""
+    messages = state["messages"]
+    user_input = messages[-1].content.strip().lower()
+
+    greetings = {"你好", "您好", "hi", "hello", "在吗", "在么", "有人吗", "哈喽"}
+    thanks = {"谢谢", "感谢", "谢了", "多谢"}
+    goodbyes = {"再见", "拜拜", "bye", "88", "回头聊"}
+
+    if any(word in user_input for word in greetings):
+        content = "您好！我是智能客服，有什么可以帮您的吗？😊"
+    elif any(word in user_input for word in thanks):
+        content = "不客气！很高兴能帮到您~"
+    elif any(word in user_input for word in goodbyes):
+        content = "再见！感谢您的咨询，祝您生活愉快！👋"
+    else:
+        content = "您好！我可以帮您查询产品、售后、订单、物流等问题，请问需要什么帮助？"
+
+    return {"messages": [AIMessage(content=content)]}
+
+
 def intent_node(state: AgentState) -> AgentState:
     """
     意图识别节点
@@ -93,7 +128,7 @@ def intent_node(state: AgentState) -> AgentState:
     intent = recognize_intent(last_message)
     logger.info(f"Intent: {intent.value}")
 
-    return {"intent": intent}
+    return {"intent": intent.value}
 
 
 def rag_node(state: AgentState) -> AgentState:
@@ -155,17 +190,11 @@ def agent_node(state: AgentState) -> AgentState:
         return {"messages": [response]}
 
     user_query = messages[-1].content
-    system_prompt = """你是一个智能客服助手。请严格遵守以下规则：
-## 核心原则
-1. 只能回答与客服相关的问题（商品、订单、物流、支付、售后等）
-2. 如果不知道答案，直接说不知道，不要编造虚假信息
-3. 保持专业、友好、简洁的回答风格
-
-## 工具使用
-- 订单查询关键词：订单号、查订单、订单状态
-- 物流查询关键词：物流、快递、发货、到哪了
-- 转人工关键词：转人工、投诉、找客服
-"""
+    system_prompt = """你是一个智能客服助手。根据用户问题，直接调用工具查询。
+如果需要查询订单，请调用 query_order 工具。
+如果需要查询物流，请调用 query_logistics 工具。
+如果需要查询用户信息，请调用 query_user_info 工具。
+不要引导用户，直接回答问题。"""
 
     llm_messages = [
         SystemMessage(content=system_prompt),
@@ -189,13 +218,25 @@ def tools_node(state: AgentState) -> AgentState:
 
     tool_call = tool_calls[0]
     tool_name = tool_call["name"]
-    tool_args = tool_call["args"]
+    tool_args_raw = tool_call.get("args", {})
     tool_call_id = tool_call.get("id", "")
+
+    if isinstance(tool_args_raw, str):
+        tool_args = json.loads(tool_args_raw) if tool_args_raw else {}
+    elif isinstance(tool_args_raw, dict):
+        tool_args = tool_args_raw
+    else:
+        tool_args = {}
+
     logger.info(f"Tool call: {tool_name}, args: {tool_args}")
 
     tool_func = TOOL_MAP.get(tool_name)
     if tool_func:
-        tool_result = tool_func.invoke(tool_args)
+        try:
+            tool_result = tool_func.invoke(tool_args)
+        except Exception as e:
+            logger.error(f"Tool call failed: {e}")
+            tool_result = f"工具执行失败: {str(e)}"
         tool_response = f"为您查询到：\n{tool_result}"
         return {
             "messages": [
@@ -225,9 +266,11 @@ def create_agent_graph():
     graph = StateGraph(AgentState)
 
     graph.add_node("intent", intent_node)
+    graph.add_node("chat", chat_node)
     graph.add_node("rag", rag_node)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tools_node)
+    graph.add_node("transfer", transfer_node)
 
     graph.set_entry_point("intent")
 
@@ -236,23 +279,37 @@ def create_agent_graph():
         if not intent:
             return "rag"
 
-        if intent == Intent.TRANSFER_HUMAN:
-            return "end"
+        # 转人工
+        if intent == "transfer":
+            return "transfer"
 
-        if intent in [Intent.ORDER_QUERY, Intent.LOGISTICS_QUERY, Intent.USER_QUERY]:
+        # 聊天节点（问候/闲聊）
+        if intent == "chat":
+            return "chat"
+
+        # 产品咨询 → RAG
+        if intent == "product":
+            return "rag"
+
+        # 订单、物流、用户 → 工具调用
+        if intent in ["order", "logistics", "user"]:
             return "agent"
 
-        return "rag"
+        return "chat"
 
     graph.add_conditional_edges(
         "intent",
         router,
         {
+            "chat": "chat",
             "rag": "rag",
             "agent": "agent",
-            "end": END,
+            "transfer": "transfer",
         },
     )
+
+    graph.add_edge("transfer", END)
+    graph.add_edge("chat", END)
 
     def should_call_tool(state: AgentState) -> str:
         messages = state.get("messages", [])
@@ -329,24 +386,17 @@ def run_agent(
 
     for event in get_agent_graph().stream(initial_state):
         if "intent" in event:
-            intent_val = event["intent"].get("intent")
-            if intent_val:
-                yield f"[意图识别: {intent_val.value}] "
             continue
 
         if "tools" in event:
-            tools_msgs = event["tools"].get("messages", [])
-            if tools_msgs:
-                yield f"[正在查询...] "
             continue
 
-        for node_name in ["rag", "agent"]:
+        for node_name in ["chat", "rag", "agent"]:
             if node_name in event:
                 messages = event[node_name].get("messages", [])
                 if messages:
                     msg = messages[-1]
                     if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        yield f"[正在处理...] "
                         continue
 
                     if msg.content:

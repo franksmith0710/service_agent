@@ -21,7 +21,7 @@ class LLMConfig:
     temperature: float = 0.7
     base_url: str = "http://localhost:11434"
     api_key: str = "ollama"
-    timeout: int = 30
+    timeout: int = 120
 
 
 @dataclass

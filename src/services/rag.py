@@ -84,7 +84,7 @@ class KnowledgeBase:
             logger.warning(f"Failed to load existing DB: {e}, creating new")
             self.vector_store = None
 
-        self._initialized = True
+        self._initialized = True  # 即使失败也标记为已初始化
 
     def get_retriever(self, search_kwargs: Optional[dict] = None):
         """获取检索器"""
@@ -216,52 +216,6 @@ def init_from_files(
     count = len(new_docs)
     logger.info(f"Vector DB update completed: {count} new documents")
     return count
-
-
-def init_vector_db_from_long_text(
-    long_text: str,
-    collection_name: str = "kefu_knowledge",
-    persist_directory: str = "./chroma_db",
-) -> int:
-    """从长文本初始化向量数据库（备用功能）
-
-    使用 RecursiveCharacterTextSplitter 自动切分文本，
-    然后使用 bge-m3 生成向量，存入 Chroma
-    """
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=300,
-        chunk_overlap=50,
-        separators=["\n\n", "\n", "。", " "],
-    )
-
-    chunks = text_splitter.split_text(long_text)
-    logger.info(f"Split text into {len(chunks)} chunks")
-
-    documents = [
-        Document(page_content=chunk, metadata={"source": "user_upload", "index": i})
-        for i, chunk in enumerate(chunks)
-    ]
-
-    embeddings = OllamaEmbeddings(
-        model=config.embedding.model,
-        base_url=config.embedding.base_url,
-    )
-
-    os.makedirs(persist_directory, exist_ok=True)
-
-    Chroma(
-        persist_directory=persist_directory, embedding_function=embeddings
-    ).delete_collection()
-
-    vector_store = Chroma.from_documents(
-        documents=documents,
-        embedding=embeddings,
-        collection_name=collection_name,
-        persist_directory=persist_directory,
-    )
-
-    logger.info(f"Vector DB initialized with {len(documents)} documents")
-    return len(documents)
 
 
 if __name__ == "__main__":

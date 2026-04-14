@@ -17,7 +17,10 @@ logger = setup_logger(name="kefu_agent", level=20)
 
 
 def init_knowledge_base():
-    """检查并初始化知识库"""
+    """检查并初始化知识库（带缓存）"""
+    if hasattr(st, "session_state") and "kb_initialized" in st.session_state:
+        return
+
     try:
         rag = get_rag()
         docs = rag.similarity_search("测试", k=1)
@@ -25,13 +28,12 @@ def init_knowledge_base():
             print("知识库为空，正在初始化...")
             init_from_files()
             print("知识库初始化完成")
+        if hasattr(st, "session_state"):
+            st.session_state.kb_initialized = True
     except Exception as e:
-        print(f"正在初始化知识库... {e}")
-        try:
-            init_from_files()
-            print("知识库初始化完成")
-        except Exception as init_error:
-            print(f"知识库初始化失败: {init_error}")
+        print(f"初始化知识库失败: {e}")
+        if hasattr(st, "session_state"):
+            st.session_state.kb_initialized = True  # 即使失败也标记，避免重复尝试
 
 
 # 设置页面配置
@@ -72,9 +74,10 @@ def main():
             full_response = ""
 
             try:
-                for chunk in run_agent(st.session_state.session_id, prompt):
-                    full_response += chunk
-                    message_placeholder.markdown(full_response)
+                with st.spinner("🤔 思考中..."):
+                    for chunk in run_agent(st.session_state.session_id, prompt):
+                        full_response += chunk
+                        message_placeholder.markdown(full_response)
 
             except Exception as e:
                 logger.error(f"Agent error: {e}")
