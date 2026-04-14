@@ -27,10 +27,11 @@ class TestTools:
         from src.services.tools import get_all_tools
 
         tools = get_all_tools()
-        assert len(tools) == 3
+        assert len(tools) == 4
         tool_names = [t.name for t in tools]
         assert "query_order" in tool_names
         assert "query_logistics" in tool_names
+        assert "query_user_info" in tool_names
         assert "transfer_to_human" in tool_names
 
     def test_extract_order_id(self):
