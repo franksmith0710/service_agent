@@ -35,12 +35,17 @@ def handle_tool_error(func_name: str, error: Exception) -> str:
 def query_order(
     order_id: str = "", user_id: Optional[str] = None, phone: Optional[str] = None
 ) -> str:
+def query_order(
+    order_id: str = "", user_id: Optional[str] = None, phone: Optional[str] = None
+) -> str:
     """
     查询订单信息
 
     Args:
         order_id: 订单号（优先）
+        order_id: 订单号（优先）
         user_id: 用户ID（可选）
+        phone: 手机号（可选）
         phone: 手机号（可选）
 
     Returns:
@@ -96,10 +101,13 @@ def _format_order(order) -> str:
 
 @tool
 def query_logistics(order_id: str = "", phone: Optional[str] = None) -> str:
+def query_logistics(order_id: str = "", phone: Optional[str] = None) -> str:
     """
     查询物流信息
 
     Args:
+        order_id: 订单号（优先）
+        phone: 手机号（可选）
         order_id: 订单号（优先）
         phone: 手机号（可选）
 
@@ -222,4 +230,5 @@ def transfer_to_human(reason: str, conversation_summary: Optional[str] = None) -
 
 def get_all_tools():
     """获取所有工具"""
+    return [query_order, query_logistics, query_user_info, transfer_to_human]
     return [query_order, query_logistics, query_user_info, transfer_to_human]
