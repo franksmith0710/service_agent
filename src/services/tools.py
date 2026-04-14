@@ -6,8 +6,9 @@ Agent 工具模块
 """
 
 import re
+import json
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from langchain_core.tools import tool
 
 from src.services.postgres import (
@@ -35,17 +36,12 @@ def handle_tool_error(func_name: str, error: Exception) -> str:
 def query_order(
     order_id: str = "", user_id: Optional[str] = None, phone: Optional[str] = None
 ) -> str:
-def query_order(
-    order_id: str = "", user_id: Optional[str] = None, phone: Optional[str] = None
-) -> str:
     """
-    查询订单信息
+    查询订单信息。
 
     Args:
         order_id: 订单号（优先）
-        order_id: 订单号（优先）
         user_id: 用户ID（可选）
-        phone: 手机号（可选）
         phone: 手机号（可选）
 
     Returns:
@@ -80,15 +76,25 @@ def query_order(
         return handle_tool_error("query_order", e)
 
 
-def _format_order(order) -> str:
+def _format_order(order: Dict[str, Any]) -> str:
     """格式化订单信息"""
     items = order.get("items", [])
+    if not items:
+        items = [
+            {
+                "name": order.get("item_name", "商品"),
+                "quantity": order.get("quantity", 1),
+                "price": order.get("price", 0),
+            }
+        ]
+
     items_str = "\n".join(
         [
             f"  - {item.get('name', '商品')} x{item.get('quantity', 1)} ¥{item.get('price', 0)}"
             for item in items
         ]
     )
+
     return f"""订单号: {order.get("order_id", "N/A")}
 状态: {order.get("status", "未知")}
 商品:
@@ -101,13 +107,10 @@ def _format_order(order) -> str:
 
 @tool
 def query_logistics(order_id: str = "", phone: Optional[str] = None) -> str:
-def query_logistics(order_id: str = "", phone: Optional[str] = None) -> str:
     """
-    查询物流信息
+    查询物流信息。
 
     Args:
-        order_id: 订单号（优先）
-        phone: 手机号（可选）
         order_id: 订单号（优先）
         phone: 手机号（可选）
 
@@ -145,12 +148,10 @@ def query_logistics(order_id: str = "", phone: Optional[str] = None) -> str:
         return handle_tool_error("query_logistics", e)
 
 
-def _format_logistics(logistics) -> str:
+def _format_logistics(logistics: Dict[str, Any]) -> str:
     """格式化物流信息"""
     trace = logistics.get("trace", [])
     if isinstance(trace, str):
-        import json
-
         try:
             trace = json.loads(trace)
         except:
@@ -162,6 +163,7 @@ def _format_logistics(logistics) -> str:
             for t in trace
         ]
     )
+
     return f"""订单号: {logistics.get("order_id", "N/A")}
 承运商: {logistics.get("carrier", "未知")}
 运单号: {logistics.get("tracking_number", "未知")}
@@ -174,7 +176,7 @@ def _format_logistics(logistics) -> str:
 @tool
 def query_user_info(phone: str) -> str:
     """
-    查询用户信息
+    查询用户信息。
 
     Args:
         phone: 手机号
@@ -200,7 +202,7 @@ def query_user_info(phone: str) -> str:
 @tool
 def transfer_to_human(reason: str, conversation_summary: Optional[str] = None) -> str:
     """
-    转接人工客服
+    转接人工客服。
 
     Args:
         reason: 转接原因
@@ -217,7 +219,7 @@ def transfer_to_human(reason: str, conversation_summary: Optional[str] = None) -
 转接原因: {reason}
 请稍候，人工客服将尽快为您服务。
 人工客服工作时间: 周一至周五 9:00-18:00
-客服热线: 400-888-8888"""
+客服热线: 400-990-5898"""
 
         if conversation_summary:
             result += f"\n\n对话摘要: {conversation_summary[:100]}"
@@ -230,5 +232,4 @@ def transfer_to_human(reason: str, conversation_summary: Optional[str] = None) -
 
 def get_all_tools():
     """获取所有工具"""
-    return [query_order, query_logistics, query_user_info, transfer_to_human]
     return [query_order, query_logistics, query_user_info, transfer_to_human]

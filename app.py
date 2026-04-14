@@ -9,11 +9,30 @@ from langchain_core.messages import HumanMessage
 
 from src.services.agent import run_agent
 from src.services.memory import get_memory
+from src.services.rag import init_from_files, get_rag
 from src.config.settings import config
 from src.config.logger import setup_logger
 
-# 初始化日志
 logger = setup_logger(name="kefu_agent", level=20)
+
+
+def init_knowledge_base():
+    """检查并初始化知识库"""
+    try:
+        rag = get_rag()
+        docs = rag.similarity_search("测试", k=1)
+        if not docs:
+            print("知识库为空，正在初始化...")
+            init_from_files()
+            print("知识库初始化完成")
+    except Exception as e:
+        print(f"正在初始化知识库... {e}")
+        try:
+            init_from_files()
+            print("知识库初始化完成")
+        except Exception as init_error:
+            print(f"知识库初始化失败: {init_error}")
+
 
 # 设置页面配置
 st.set_page_config(
@@ -29,6 +48,9 @@ if "session_id" not in st.session_state:
 
 def main():
     """主函数"""
+    with st.spinner("正在初始化知识库..."):
+        init_knowledge_base()
+
     st.title("🤖 智能客服")
     st.markdown("---")
 

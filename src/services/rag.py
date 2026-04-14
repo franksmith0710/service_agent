@@ -2,12 +2,13 @@
 RAG 知识库服务模块
 
 提供基于 Chroma 的向量知识库检索
-支持从文件加载知识库数据
+支持从文件加载知识库数据（增量添加）
 """
 
 import os
 import glob
 import logging
+import hashlib
 from typing import Optional, List, Dict
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
@@ -27,6 +28,11 @@ CATEGORY_MAP = {
     "kb_pre_sales.txt": "pre_sales",
     "kb_after_sales.txt": "after_sales",
 }
+
+
+def _compute_content_hash(content: str) -> str:
+    """计算内容哈希，用于去重"""
+    return hashlib.md5(content.encode("utf-8")).hexdigest()
 
 
 class KnowledgeBase:
@@ -84,7 +90,7 @@ class KnowledgeBase:
         """获取检索器"""
         self.initialize()
         return self.vector_store.as_retriever(search_kwargs=search_kwargs or {"k": 3})
- 
+
     def add_documents(self, documents: list[Document]) -> None:
         """添加文档"""
         self.initialize()
@@ -147,7 +153,7 @@ def load_knowledge_files(data_dir: str = "./data") -> List[Document]:
 def init_from_files(
     data_dir: str = "./data", collection_name: str = "kefu_knowledge"
 ) -> int:
-    """从文件初始化向量数据库
+    """从文件初始化向量数据库（增量添加）
 
     Args:
         data_dir: 数据文件目录
@@ -170,26 +176,45 @@ def init_from_files(
         base_url=config.embedding.base_url,
     )
 
+    new_docs = []
     try:
         existing = Chroma(
             collection_name=collection_name,
             embedding_function=embeddings,
             persist_directory=persist_directory,
         )
-        existing.delete_collection()
-        logger.info(f"Deleted existing collection: {collection_name}")
-    except:
-        pass
 
-    vector_store = Chroma.from_documents(
-        documents=documents,
-        embedding=embeddings,
-        collection_name=collection_name,
-        persist_directory=persist_directory,
-    )
+        existing_hashes = set()
+        existing_count = existing._collection.count()
+        if existing_count > 0:
+            all_docs = existing.get()
+            for doc in all_docs.get("documents", []):
+                existing_hashes.add(_compute_content_hash(doc))
 
-    count = len(documents)
-    logger.info(f"Initialized vector DB with {count} documents")
+        for doc in documents:
+            doc_hash = _compute_content_hash(doc.page_content)
+            if doc_hash not in existing_hashes:
+                new_docs.append(doc)
+                existing_hashes.add(doc_hash)
+
+        if new_docs:
+            existing.add_documents(new_docs)
+            logger.info(
+                f"Added {len(new_docs)} new documents (skipped {len(documents) - len(new_docs)} duplicates)"
+            )
+
+    except Exception as e:
+        logger.warning(f"Failed to load existing DB: {e}, creating new")
+        vector_store = Chroma.from_documents(
+            documents=documents,
+            embedding=embeddings,
+            collection_name=collection_name,
+            persist_directory=persist_directory,
+        )
+        new_docs = documents
+
+    count = len(new_docs)
+    logger.info(f"Vector DB update completed: {count} new documents")
     return count
 
 

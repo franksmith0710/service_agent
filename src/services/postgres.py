@@ -183,26 +183,30 @@ def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
 
 
 def get_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
-    """根据订单号查询订单"""
+    """根据订单号查询订单（支持多商品）"""
     results = execute_query("SELECT * FROM orders WHERE order_id = %s", (order_id,))
     if not results:
         return None
-    r = results[0]
+
+    first_r = results[0]
+    items = [
+        {
+            "name": r["item_name"],
+            "quantity": r["quantity"],
+            "price": _to_float(r["price"]),
+        }
+        for r in results
+    ]
+
     return {
-        "order_id": r["order_id"],
-        "user_id": r["user_id"],
-        "status": r["status"],
-        "items": [
-            {
-                "name": r["item_name"],
-                "quantity": r["quantity"],
-                "price": _to_float(r["price"]),
-            }
-        ],
-        "total_amount": _to_float(r["total_amount"]),
-        "created_at": _format_datetime(r.get("created_at")),
-        "pay_method": r.get("pay_method"),
-        "shipping_address": r.get("shipping_address"),
+        "order_id": first_r["order_id"],
+        "user_id": first_r["user_id"],
+        "status": first_r["status"],
+        "items": items,
+        "total_amount": _to_float(first_r["total_amount"]),
+        "created_at": _format_datetime(first_r.get("created_at")),
+        "pay_method": first_r.get("pay_method"),
+        "shipping_address": first_r.get("shipping_address"),
     }
 
 
@@ -227,7 +231,7 @@ def get_orders_by_user_id(user_id: str) -> List[Dict[str, Any]]:
 
 
 def _format_order(r: Dict[str, Any]) -> Dict[str, Any]:
-    """格式化订单数据"""
+    """格式化订单数据（支持多商品）"""
     return {
         "order_id": r["order_id"],
         "user_id": r["user_id"],
@@ -244,6 +248,21 @@ def _format_order(r: Dict[str, Any]) -> Dict[str, Any]:
         "pay_method": r.get("pay_method"),
         "shipping_address": r.get("shipping_address"),
     }
+
+
+def get_order_items_by_id(order_id: str) -> List[Dict[str, Any]]:
+    """获取订单的所有商品"""
+    results = execute_query(
+        "SELECT item_name, quantity, price FROM orders WHERE order_id = %s", (order_id,)
+    )
+    return [
+        {
+            "name": r["item_name"],
+            "quantity": r["quantity"],
+            "price": _to_float(r["price"]),
+        }
+        for r in results
+    ]
 
 
 def search_orders(keyword: str) -> List[Dict[str, Any]]:

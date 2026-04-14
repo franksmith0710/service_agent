@@ -136,25 +136,25 @@ def rag_node(state: AgentState) -> AgentState:
 
 def agent_node(state: AgentState) -> AgentState:
     """
-    Agent 节点（✅ 已修复 ToolMessage + 20015）
+    Agent 节点（ReAct 工具调用）
     """
     messages = state["messages"]
-    user_query = messages[-1].content
+    last_msg = messages[-1]
     llm_with_tools = get_llm_with_tools()
 
-    # 工具返回结果 → 生成回答
-    if isinstance(messages[-1], ToolMessage):
-        system_prompt = """你是智能客服助手，根据工具结果自然回答用户。"""
-        # ✅ 修复：必须带上用户原始问题
+    if isinstance(last_msg, ToolMessage):
+        system_prompt = """你是智能客服助手，根据工具结果自然回答用户。
+要求：简洁、专业、直接回答用户问题。
+"""
+        context_msg = f"工具查询结果：{last_msg.content}"
         llm_messages = [
             SystemMessage(content=system_prompt),
-            *messages,
-            HumanMessage(content=user_query),
+            HumanMessage(content=context_msg),
         ]
         response = llm_with_tools.invoke(llm_messages)
         return {"messages": [response]}
 
-    # 正常对话
+    user_query = messages[-1].content
     system_prompt = """你是一个智能客服助手。请严格遵守以下规则：
 ## 核心原则
 1. 只能回答与客服相关的问题（商品、订单、物流、支付、售后等）
@@ -167,7 +167,6 @@ def agent_node(state: AgentState) -> AgentState:
 - 转人工关键词：转人工、投诉、找客服
 """
 
-    # ✅ 修复：只保留 system + 用户真实问题
     llm_messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_query),
@@ -291,13 +290,16 @@ def get_agent_graph():
     return _agent_graph
 
 
-def run_agent(session_id: str, user_input: str) -> Generator[str, None, None]:
+def run_agent(
+    session_id: str, user_input: str, enable_stream: bool = True
+) -> Generator[str, None, None]:
     """
     运行 Agent 处理用户输入
 
     Args:
         session_id: 会话 ID
         user_input: 用户输入
+        enable_stream: 是否启用流式输出
 
     Yields:
         流式输出的文本片段
@@ -322,9 +324,20 @@ def run_agent(session_id: str, user_input: str) -> Generator[str, None, None]:
         "intent": None,
     }
 
+    llm_with_tools = get_llm_with_tools()
     full_response = ""
+
     for event in get_agent_graph().stream(initial_state):
         if "intent" in event:
+            intent_val = event["intent"].get("intent")
+            if intent_val:
+                yield f"[意图识别: {intent_val.value}] "
+            continue
+
+        if "tools" in event:
+            tools_msgs = event["tools"].get("messages", [])
+            if tools_msgs:
+                yield f"[正在查询...] "
             continue
 
         for node_name in ["rag", "agent"]:
@@ -332,14 +345,21 @@ def run_agent(session_id: str, user_input: str) -> Generator[str, None, None]:
                 messages = event[node_name].get("messages", [])
                 if messages:
                     msg = messages[-1]
-                    if msg.content:
-                        new_content = msg.content[len(full_response) :]
-                        full_response += new_content
-                        if new_content:
-                            yield new_content
+                    if hasattr(msg, "tool_calls") and msg.tool_calls:
+                        yield f"[正在处理...] "
+                        continue
 
-        if "tools" in event:
-            pass
+                    if msg.content:
+                        content = msg.content
+                        if enable_stream:
+                            for chunk in llm_with_tools.stream(content):
+                                if chunk.content:
+                                    yield chunk.content
+                        else:
+                            yield content
+                        full_response = content
+                        break
+                break
 
     memory.add_user_message(user_input)
     memory.add_ai_message(full_response)
