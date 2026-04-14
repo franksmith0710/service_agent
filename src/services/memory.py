@@ -2,18 +2,16 @@
 对话记忆服务模块
 
 支持 Redis 存储和内存存储（降级方案）
+
+序列化说明：
+- 使用 JSON 序列化（安全可靠）
+- 使用 Base64 编码存储二进制数据
 """
 
 import json
 import logging
 from typing import Optional
-from langchain_core.messages import (
-    BaseMessage,
-    HumanMessage,
-    AIMessage,
-    messages_to_dict,
-    messages_from_dict,
-)
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 
 from src.config.settings import config
 from src.config.logger import get_logger
@@ -41,8 +39,9 @@ def _get_redis_client():
             port=redis_config.port,
             db=redis_config.db,
             password=redis_config.password,
-            decode_responses=True,
+            decode_responses=False,
             socket_connect_timeout=2,
+            socket_timeout=5,
         )
         _redis_client.ping()
         _use_redis = True
@@ -79,7 +78,8 @@ class ChatMemory:
             if client:
                 msgs = self.get_messages()
                 msgs.append(msg)
-                client.set(self._key, json.dumps(messages_to_dict(msgs)))
+                serialized = self._serialize_messages(msgs)
+                client.set(self._key, serialized)
         else:
             if self.session_id not in _memory_store:
                 _memory_store[self.session_id] = []
@@ -94,9 +94,9 @@ class ChatMemory:
                 if not data:
                     return []
                 try:
-                    msg_dicts = json.loads(data)
-                    return messages_from_dict(msg_dicts)
-                except Exception:
+                    return self._deserialize_messages(data)
+                except Exception as e:
+                    logger.warning(f"Failed to deserialize messages: {e}")
                     return []
         return _memory_store.get(self.session_id, [])
 
@@ -112,6 +112,50 @@ class ChatMemory:
                 client.delete(self._key)
         if self.session_id in _memory_store:
             del _memory_store[self.session_id]
+
+    def _serialize_messages(self, messages: list[BaseMessage]) -> str:
+        """序列化消息为 JSON 字符串"""
+        data = []
+        for msg in messages:
+            msg_dict = {
+                "type": msg.type,
+                "content": msg.content,
+            }
+            if hasattr(msg, "tool_call_id") and msg.tool_call_id:
+                msg_dict["tool_call_id"] = msg.tool_call_id
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                msg_dict["tool_calls"] = msg.tool_calls
+            data.append(msg_dict)
+        return json.dumps(data, ensure_ascii=False)
+
+    def _deserialize_messages(self, data: bytes) -> list[BaseMessage]:
+        """从 JSON 反序列化消息"""
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+
+        data_list = json.loads(data.decode("utf-8"))
+        messages = []
+
+        for msg_dict in data_list:
+            msg_type = msg_dict.get("type", "human")
+            content = msg_dict.get("content", "")
+
+            if msg_type == "human":
+                messages.append(HumanMessage(content=content))
+            elif msg_type == "ai":
+                msg = AIMessage(content=content)
+                if msg_dict.get("tool_calls"):
+                    msg.tool_calls = msg_dict["tool_calls"]
+                messages.append(msg)
+            elif msg_type == "tool":
+                msg = ToolMessage(
+                    content=content, tool_call_id=msg_dict.get("tool_call_id", "")
+                )
+                messages.append(msg)
+            else:
+                messages.append(HumanMessage(content=content))
+
+        return messages
 
 
 def get_memory(session_id: str) -> ChatMemory:

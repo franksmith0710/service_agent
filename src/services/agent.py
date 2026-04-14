@@ -1,158 +1,346 @@
 """
 Agent 服务模块
 
-基于 LangChain create_agent 的 ReAct 代理
+基于 LangGraph StateGraph 的 ReAct 代理
+
+企业级客服流程：
+1. intent_node - 意图识别
+2. rag_node - 检索 FAQ
+3. agent_node - 思考 & 决定 tool_call
+4. tools_node - 执行工具
+5. conditional edge - 循环 ReAct
+
+工作流程：
+- intent_node → router
+- router → rag_node（闲聊/咨询）
+- router → agent_node（订单/物流/用户信息）
+- router → 直接转人工（投诉/敏感/复杂）
+- agent_node → tools_node（有tool_calls）→ agent_node
+- agent_node → 结束（无tool_calls）
+- tools_node → 回答生成
 """
 
 import os
 import logging
-from typing import Generator, Optional
+from typing import Generator
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    AIMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.runnables import RunnableConfig
 
 from src.config.settings import config
 from src.config.logger import get_logger
-from src.services.llm import get_llm
+from src.models.types import AgentState
+
 from src.services.tools import get_all_tools
-from src.services.rag import get_rag
 from src.services.memory import get_memory
-from src.services.intent import recognize_intent, Intent
+from src.services.intent import Intent, recognize_intent
+from src.services.rag import get_rag
+from src.services.validator import (
+    InputValidator,
+    ExceptionHandler,
+    ValidationError,
+)
 
 logger = get_logger(__name__)
 
-# 初始化 LangSmith 追踪
+# 初始化 LangSmith 追踪（可选，用于调试）
 if config.langsmith.api_key:
     os.environ["LANGCHAIN_API_KEY"] = config.langsmith.api_key
     os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "true")
     os.environ["LANGCHAIN_PROJECT"] = config.langsmith.project_name
     logger.info(f"LangSmith tracing enabled: project={config.langsmith.project_name}")
 
-SYSTEM_PROMPT = """你是一个智能客服助手。请严格遵守以下规则：
 
+# ==================== 工具函数映射 ====================
+
+from src.services.tools import (
+    query_order,
+    query_logistics,
+    query_user_info,
+    transfer_to_human,
+)
+
+TOOL_MAP = {
+    "query_order": query_order,
+    "query_logistics": query_logistics,
+    "query_user_info": query_user_info,
+    "transfer_to_human": transfer_to_human,
+}
+
+
+# ==================== LLM 工具绑定缓存 ====================
+
+from src.services.llm import get_llm_with_tools
+
+
+# ==================== 节点函数 ====================
+
+
+def intent_node(state: AgentState) -> AgentState:
+    """
+    意图识别节点
+    识别用户意图，设置 state.intent
+    """
+    messages = state["messages"]
+    last_message = messages[-1].content
+
+    intent = recognize_intent(last_message)
+    logger.info(f"Intent: {intent.value}")
+
+    return {"intent": intent}
+
+
+def rag_node(state: AgentState) -> AgentState:
+    """
+    RAG 检索节点（✅ 已修复 20015）
+    """
+    messages = state["messages"]
+    user_query = messages[-1].content  # 真实用户问题
+
+    # RAG 检索
+    try:
+        rag = get_rag()
+        docs = rag.similarity_search(user_query, k=2)
+        rag_context = "\n".join([d.page_content for d in docs]) if docs else ""
+    except Exception as e:
+        logger.warning(f"RAG search failed: {e}")
+        rag_context = ""
+
+    # 构建回答
+    system_prompt = f"""你是一个智能客服助手。请根据以下知识库内容回答用户问题。
+
+知识库：
+{rag_context}
+
+要求：
+- 只根据知识库内容回答，不要编造
+- 如果知识库没有相关信息，请如实告知用户"""
+
+    llm_with_tools = get_llm_with_tools()
+
+    # ✅ 【修复】最后一条 100% 是真实用户消息
+    llm_messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_query),
+    ]
+
+    response = llm_with_tools.invoke(llm_messages)
+    return {"messages": [response]}
+
+
+def agent_node(state: AgentState) -> AgentState:
+    """
+    Agent 节点（✅ 已修复 ToolMessage + 20015）
+    """
+    messages = state["messages"]
+    user_query = messages[-1].content
+    llm_with_tools = get_llm_with_tools()
+
+    # 工具返回结果 → 生成回答
+    if isinstance(messages[-1], ToolMessage):
+        system_prompt = """你是智能客服助手，根据工具结果自然回答用户。"""
+        # ✅ 修复：必须带上用户原始问题
+        llm_messages = [
+            SystemMessage(content=system_prompt),
+            *messages,
+            HumanMessage(content=user_query),
+        ]
+        response = llm_with_tools.invoke(llm_messages)
+        return {"messages": [response]}
+
+    # 正常对话
+    system_prompt = """你是一个智能客服助手。请严格遵守以下规则：
 ## 核心原则
-1. 只能回答与客服相关的问题（商品、订单、物流、支付、售后等），不要回答无关问题
+1. 只能回答与客服相关的问题（商品、订单、物流、支付、售后等）
 2. 如果不知道答案，直接说不知道，不要编造虚假信息
 3. 保持专业、友好、简洁的回答风格
 
-## 意图识别规则
-- 用户提到"订单"、"订单号"、"查订单" → 使用 query_order 工具
-- 用户提到"物流"、"快递"、"发货"、"到哪了" → 使用 query_logistics 工具
-- 用户要求"转人工"、"找客服"、"投诉" → 使用 transfer_to_human 工具
-- 用户询问商品、售后、支付等常见问题 → 使用知识库（RAG）回答
-
-## 工具使用时机
-- 当用户明确提到订单号时，提取订单号并调用 query_order
-- 当用户询问物流状态时，提取订单号并调用 query_logistics
-- 当用户明确要求转人工时，调用 transfer_to_human
-- 当不确定时，优先使用知识库回答
-
-## 回答要求
-- 首次回答应简洁明了
-- 如需调用工具，明确告诉用户正在查询
-- 回答结束时，可适当引导用户下一步需求
+## 工具使用
+- 订单查询关键词：订单号、查订单、订单状态
+- 物流查询关键词：物流、快递、发货、到哪了
+- 转人工关键词：转人工、投诉、找客服
 """
 
-_agent_instance: Optional["Agent"] = None
+    # ✅ 修复：只保留 system + 用户真实问题
+    llm_messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_query),
+    ]
+
+    response = llm_with_tools.invoke(llm_messages)
+    return {"messages": [response]}
 
 
-class Agent:
-    """Agent 代理类"""
+def tools_node(state: AgentState) -> AgentState:
+    """
+    工具执行节点
+    """
+    messages = state["messages"]
+    last_msg = messages[-1]
 
-    def __init__(self):
-        self.llm = get_llm()
-        self.tools = get_all_tools()
-        self._agent_graph = self._create_agent()
+    tool_calls = getattr(last_msg, "tool_calls", None)
+    if not tool_calls:
+        return {"messages": [AIMessage(content="无工具调用")]}
 
-    def _create_agent(self):
-        """创建 Agent 图"""
-        from langchain.agents import create_agent
+    tool_call = tool_calls[0]
+    tool_name = tool_call["name"]
+    tool_args = tool_call["args"]
+    tool_call_id = tool_call.get("id", "")
+    logger.info(f"Tool call: {tool_name}, args: {tool_args}")
 
-        agent = create_agent(
-            self.llm,
-            self.tools,
-            system_prompt=SYSTEM_PROMPT,
-        )
-        logger.info("Agent graph created")
-        return agent
-
-    def run(self, session_id: str, user_input: str) -> Generator[str, None, None]:
-        """
-        执行 Agent 处理用户输入，支持流式输出
-
-        Args:
-            session_id: 会话 ID
-            user_input: 用户输入
-
-        Yields:
-            生成的文本片段
-        """
-        memory = get_memory(session_id)
-        history = memory.get_messages()
-
-        # 意图识别
-        intent = recognize_intent(user_input)
-        logger.info(f"Recognized intent: {intent.value}")
-
-        # RAG 检索
-        try:
-            rag = get_rag()
-            docs = rag.similarity_search(user_input, k=3)
-            context = "\n".join([d.page_content for d in docs]) if docs else ""
-        except Exception as e:
-            logger.warning(f"RAG search failed: {e}")
-            context = ""
-
-        # 增强输入（添加意图信息）
-        intent_hint = (
-            f"\n\n[意图识别: {intent.value}]" if intent.value != "chat" else ""
-        )
-        if context:
-            enhanced_input = f"{user_input}{intent_hint}\n\n相关知识：{context}"
-        else:
-            enhanced_input = f"{user_input}{intent_hint}"
-
-        messages = list(history) + [HumanMessage(content=enhanced_input)]
-
-        # 流式执行
-        full_response = ""
-        for chunk in self._agent_graph.stream({"messages": messages}):
-            if "messages" in chunk:
-                content = chunk["messages"][-1].content
-            elif "model" in chunk and "messages" in chunk["model"]:
-                content = chunk["model"]["messages"][-1].content
-            else:
-                continue
-
-            if content:
-                new_content = content[len(full_response) :]
-                full_response = content
-                yield new_content
-
-        # 保存到记忆
-        memory.add_user_message(user_input)
-        memory.add_ai_message(full_response)
-
-        logger.info(f"Agent response completed for session {session_id}")
+    tool_func = TOOL_MAP.get(tool_name)
+    if tool_func:
+        tool_result = tool_func.invoke(tool_args)
+        tool_response = f"为您查询到：\n{tool_result}"
+        return {
+            "messages": [
+                ToolMessage(
+                    content=tool_response,
+                    tool_call_id=tool_call_id,
+                )
+            ]
+        }
+    else:
+        return {
+            "messages": [
+                ToolMessage(
+                    content=f"未知工具: {tool_name}",
+                    tool_call_id=tool_call_id,
+                )
+            ]
+        }
 
 
-def get_agent() -> Agent:
-    """获取 Agent 实例"""
-    global _agent_instance
-    if _agent_instance is None:
-        _agent_instance = Agent()
-    return _agent_instance
+# ==================== 构建 Graph ====================
+
+
+def create_agent_graph():
+    from langgraph.graph import StateGraph, END
+
+    graph = StateGraph(AgentState)
+
+    graph.add_node("intent", intent_node)
+    graph.add_node("rag", rag_node)
+    graph.add_node("agent", agent_node)
+    graph.add_node("tools", tools_node)
+
+    graph.set_entry_point("intent")
+
+    def router(state: AgentState) -> str:
+        intent = state.get("intent")
+        if not intent:
+            return "rag"
+
+        if intent == Intent.TRANSFER_HUMAN:
+            return "end"
+
+        if intent in [Intent.ORDER_QUERY, Intent.LOGISTICS_QUERY, Intent.USER_QUERY]:
+            return "agent"
+
+        return "rag"
+
+    graph.add_conditional_edges(
+        "intent",
+        router,
+        {
+            "rag": "rag",
+            "agent": "agent",
+            "end": END,
+        },
+    )
+
+    def should_call_tool(state: AgentState) -> str:
+        messages = state.get("messages", [])
+        if not messages:
+            return "end"
+        last_msg = messages[-1]
+        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+            return "tools"
+        return "end"
+
+    graph.add_conditional_edges(
+        "agent",
+        should_call_tool,
+        {
+            "tools": "tools",
+            "end": END,
+        },
+    )
+
+    graph.add_edge("tools", "agent")
+
+    return graph.compile()
+
+
+# ==================== Agent 实例 ====================
+
+_agent_graph = None
+
+
+def get_agent_graph():
+    global _agent_graph
+    if _agent_graph is None:
+        _agent_graph = create_agent_graph()
+        logger.info("LangGraph Agent created")
+    return _agent_graph
 
 
 def run_agent(session_id: str, user_input: str) -> Generator[str, None, None]:
     """
-    运行 Agent 的便捷函数
+    运行 Agent 处理用户输入
 
     Args:
         session_id: 会话 ID
         user_input: 用户输入
 
     Yields:
-        生成的文本片段
+        流式输出的文本片段
+
+    Raises:
+        ValidationError: 输入验证失败
     """
-    agent = get_agent()
-    yield from agent.run(session_id, user_input)
+    validation_result = InputValidator.validate_message(user_input)
+    if not validation_result.is_valid:
+        raise ValidationError(validation_result.error_message)
+
+    validation_result = InputValidator.validate_session_id(session_id)
+    if not validation_result.is_valid:
+        raise ValidationError(validation_result.error_message)
+
+    memory = get_memory(session_id)
+    history = memory.get_messages()
+
+    initial_state = {
+        "messages": history + [HumanMessage(content=user_input)],
+        "session_id": session_id,
+        "intent": None,
+    }
+
+    full_response = ""
+    for event in get_agent_graph().stream(initial_state):
+        if "intent" in event:
+            continue
+
+        for node_name in ["rag", "agent"]:
+            if node_name in event:
+                messages = event[node_name].get("messages", [])
+                if messages:
+                    msg = messages[-1]
+                    if msg.content:
+                        new_content = msg.content[len(full_response) :]
+                        full_response += new_content
+                        if new_content:
+                            yield new_content
+
+        if "tools" in event:
+            pass
+
+    memory.add_user_message(user_input)
+    memory.add_ai_message(full_response)
+    logger.info(f"Agent response completed for session {session_id}")

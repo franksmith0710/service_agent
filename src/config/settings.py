@@ -21,6 +21,7 @@ class LLMConfig:
     temperature: float = 0.7
     base_url: str = "http://localhost:11434"
     api_key: str = "ollama"
+    timeout: int = 30
 
 
 @dataclass
@@ -66,6 +67,17 @@ class ChromaConfig:
 
 
 @dataclass
+class PostgresConfig:
+    """PostgreSQL 配置"""
+
+    host: str = "localhost"
+    port: int = 5432
+    user: str = "postgres"
+    password: str = "postgres"
+    database: str = "kefu_agent"
+
+
+@dataclass
 class ToolsConfig:
     """工具配置"""
 
@@ -85,6 +97,7 @@ class AppConfig:
     redis: RedisConfig = field(default_factory=RedisConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     chroma: ChromaConfig = field(default_factory=ChromaConfig)
+    postgres: PostgresConfig = field(default_factory=PostgresConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
 
 
@@ -101,6 +114,7 @@ def load_config() -> AppConfig:
             temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
+            timeout=int(os.getenv("LLM_TIMEOUT", "30")),
         ),
         siliconflow=SiliconFlowConfig(
             base_url=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
@@ -123,6 +137,13 @@ def load_config() -> AppConfig:
         ),
         chroma=ChromaConfig(
             persist_directory=os.getenv("CHROMA_DIR", "./chroma_db"),
+        ),
+        postgres=PostgresConfig(
+            host=os.getenv("POSTGRES_HOST", "localhost"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+            user=os.getenv("POSTGRES_USER", "postgres"),
+            password=os.getenv("POSTGRES_PASSWORD", "postgres"),
+            database=os.getenv("POSTGRES_DB", "kefu_agent"),
         ),
         tools=ToolsConfig(
             enabled=[

@@ -15,6 +15,7 @@ class Intent(Enum):
 
     ORDER_QUERY = "query_order"  # 订单查询
     LOGISTICS_QUERY = "query_logistics"  # 物流查询
+    USER_QUERY = "query_user_info"  # 用户信息查询
     TRANSFER_HUMAN = "transfer"  # 转人工
     GENERAL_CHAT = "chat"  # 一般聊天
     UNKNOWN = "unknown"  # 未知
@@ -43,6 +44,14 @@ INTENT_PATTERNS = {
         r"查.{0,3}物流",
         r"(?:logistics|快递).*?(?:查询|单号)",
     ],
+    Intent.USER_QUERY: [
+        r"用户[信息]?",
+        r"会员[信息]?",
+        r"账号信息",
+        r"查.{0,3}用户",
+        r"我的资料",
+        r"个人信息",
+    ],
     Intent.TRANSFER_HUMAN: [
         r"转人工",
         r"转接人工",
@@ -54,9 +63,6 @@ INTENT_PATTERNS = {
         r"transfer.*human",
     ],
 }
-
-# 是否启用 BERT 兜底
-USE_BERT_FALLBACK = os.getenv("USE_BERT_FALLBACK", "true").lower() == "true"
 
 
 def recognize_intent(text: str) -> Intent:
@@ -76,27 +82,6 @@ def recognize_intent(text: str) -> Intent:
         for pattern in patterns:
             if re.search(pattern, text_lower, re.IGNORECASE):
                 return intent
-
-    # 2. BERT 兜底
-    if USE_BERT_FALLBACK:
-        try:
-            from src.services.bert_classifier import predict_intent
-
-            bert_intent = predict_intent(text)
-            # 映射 BERT 结果到 Intent 枚举
-            intent_map = {
-                "query_order": Intent.ORDER_QUERY,
-                "query_logistics": Intent.LOGISTICS_QUERY,
-                "transfer": Intent.TRANSFER_HUMAN,
-                "chat": Intent.GENERAL_CHAT,
-            }
-            return intent_map.get(bert_intent, Intent.GENERAL_CHAT)
-        except Exception as e:
-            # 如果 BERT 失败，返回默认意图
-            from src.config.logger import get_logger
-
-            logger = get_logger(__name__)
-            logger.warning(f"BERT fallback failed: {e}")
 
     return Intent.GENERAL_CHAT
 
@@ -118,6 +103,29 @@ def extract_order_id(text: str) -> Optional[str]:
 
     # 尝试匹配其他格式
     match = re.search(r"(?:订单号?|order)[：:]\s*(\d+)", text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    return None
+
+
+def extract_phone(text: str) -> Optional[str]:
+    """
+    从文本中提取手机号
+
+    Args:
+        text: 用户输入文本
+
+    Returns:
+        手机号，如果未找到返回 None
+    """
+    # 匹配11位手机号
+    match = re.search(r"1[3-9]\d{9}", text)
+    if match:
+        return match.group()
+
+    # 尝试匹配其他格式
+    match = re.search(r"(?:手机|电话|号码)[：:]\s*(1[3-9]\d{9})", text)
     if match:
         return match.group(1)
 

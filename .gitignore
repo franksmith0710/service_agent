@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# 环境
+.env
+.env.local
+
+# 数据
+chroma_db/
+data/chroma/
+*.sqlite3
+
+# 缓存
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 日志
+*.log

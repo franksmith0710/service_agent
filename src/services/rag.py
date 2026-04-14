@@ -2,14 +2,17 @@
 RAG 知识库服务模块
 
 提供基于 Chroma 的向量知识库检索
+支持从文件加载知识库数据
 """
 
 import os
+import glob
 import logging
-from typing import Optional
+from typing import Optional, List, Dict
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.config.settings import config
 from src.config.logger import get_logger
@@ -17,6 +20,13 @@ from src.config.logger import get_logger
 logger = get_logger(__name__)
 
 _rag_instance: Optional["KnowledgeBase"] = None
+
+CATEGORY_MAP = {
+    "kb_brand.txt": "brand",
+    "kb_products.txt": "products",
+    "kb_pre_sales.txt": "pre_sales",
+    "kb_after_sales.txt": "after_sales",
+}
 
 
 class KnowledgeBase:
@@ -60,76 +70,21 @@ class KnowledgeBase:
                     f"Loaded existing knowledge base from {self.persist_directory}"
                 )
             else:
-                # collection 存在但无数据，重新填充
-                logger.info("Collection exists but empty, populating with default docs")
-                self._populate_default_docs()
+                # 如果为空，提示需要导入
+                logger.warning(
+                    "Knowledge base is empty. Run init_from_files() to load data."
+                )
         except Exception as e:
             logger.warning(f"Failed to load existing DB: {e}, creating new")
-            self._populate_default_docs()
+            self.vector_store = None
 
         self._initialized = True
-
-    def _populate_default_docs(self) -> None:
-        """填充默认文档"""
-        docs = self._get_default_docs()
-        self.vector_store = Chroma.from_documents(
-            documents=docs,
-            embedding=self.embeddings,
-            collection_name=self.collection_name,
-            persist_directory=self.persist_directory,
-        )
-        logger.info(f"Created new knowledge base with {len(docs)} documents")
-
-    def _get_default_docs(self) -> list[Document]:
-        """获取默认文档"""
-        return [
-            Document(
-                page_content="我们的营业时间是周一至周五 9:00-18:00，节假日除外。",
-                metadata={"category": "营业时间", "source": "basic_info"},
-            ),
-            Document(
-                page_content="退换货政策：商品支持7天无理由退换货，质量问题我们承担运费。非质量问题运费由买家承担。",
-                metadata={"category": "退换货", "source": "policy"},
-            ),
-            Document(
-                page_content="支持支付宝、微信支付、银行卡等多种支付方式。企业买家可申请月结付款。",
-                metadata={"category": "支付", "source": "payment"},
-            ),
-            Document(
-                page_content="会员等级：普通会员（享受9.9折）、银卡会员（消费满1000，9.5折）、金卡会员（消费满5000，9折）、钻石会员（消费满10000，8.5折）。",
-                metadata={"category": "会员", "source": "vip"},
-            ),
-            Document(
-                page_content="订单问题请联系客服，提供订单号或收货手机号以便查询。",
-                metadata={"category": "订单", "source": "faq"},
-            ),
-            Document(
-                page_content="物流说明：默认顺丰速运，特殊商品走德邦或圆通。发货后1-3天送达，同城当日达。",
-                metadata={"category": "物流", "source": "logistics"},
-            ),
-            Document(
-                page_content="运费规则：满199元免运费，不足199元收取10元运费。偏远地区需额外加收20元。",
-                metadata={"category": "运费", "source": "shipping"},
-            ),
-            Document(
-                page_content="发票说明：支持普通发票和增值税专用发票。下单时备注发票抬头和税号，一般在收货后7个工作日内开具。",
-                metadata={"category": "发票", "source": "invoice"},
-            ),
-            Document(
-                page_content="售后服务：7天无理由退换货，30天质量问题换货，1年内质保维修。质保期外收取维修费用。",
-                metadata={"category": "售后", "source": "service"},
-            ),
-            Document(
-                page_content="联系我们：客服热线400-888-8888，邮箱support@example.com，工作时间周一至周五9:00-18:00。",
-                metadata={"category": "联系", "source": "contact"},
-            ),
-        ]
 
     def get_retriever(self, search_kwargs: Optional[dict] = None):
         """获取检索器"""
         self.initialize()
         return self.vector_store.as_retriever(search_kwargs=search_kwargs or {"k": 3})
-
+ 
     def add_documents(self, documents: list[Document]) -> None:
         """添加文档"""
         self.initialize()
@@ -156,3 +111,134 @@ def get_rag() -> KnowledgeBase:
     if _rag_instance is None:
         _rag_instance = KnowledgeBase()
     return _rag_instance
+
+
+def load_knowledge_files(data_dir: str = "./data") -> List[Document]:
+    """从目录加载知识库文件
+
+    Args:
+        data_dir: 数据文件目录
+
+    Returns:
+        Document列表
+    """
+    documents = []
+
+    for filename, category in CATEGORY_MAP.items():
+        file_path = os.path.join(data_dir, filename)
+        if not os.path.exists(file_path):
+            logger.warning(f"File not found: {file_path}")
+            continue
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        if content.strip():
+            doc = Document(
+                page_content=content,
+                metadata={"source": filename, "category": category},
+            )
+            documents.append(doc)
+            logger.info(f"Loaded: {filename} ({category})")
+
+    return documents
+
+
+def init_from_files(
+    data_dir: str = "./data", collection_name: str = "kefu_knowledge"
+) -> int:
+    """从文件初始化向量数据库
+
+    Args:
+        data_dir: 数据文件目录
+        collection_name: 向量库名称
+
+    Returns:
+        导入的文档数量
+    """
+    documents = load_knowledge_files(data_dir)
+
+    if not documents:
+        logger.warning(f"No knowledge files found in {data_dir}")
+        return 0
+
+    persist_directory = config.chroma.persist_directory
+    os.makedirs(persist_directory, exist_ok=True)
+
+    embeddings = OllamaEmbeddings(
+        model=config.embedding.model,
+        base_url=config.embedding.base_url,
+    )
+
+    try:
+        existing = Chroma(
+            collection_name=collection_name,
+            embedding_function=embeddings,
+            persist_directory=persist_directory,
+        )
+        existing.delete_collection()
+        logger.info(f"Deleted existing collection: {collection_name}")
+    except:
+        pass
+
+    vector_store = Chroma.from_documents(
+        documents=documents,
+        embedding=embeddings,
+        collection_name=collection_name,
+        persist_directory=persist_directory,
+    )
+
+    count = len(documents)
+    logger.info(f"Initialized vector DB with {count} documents")
+    return count
+
+
+def init_vector_db_from_long_text(
+    long_text: str,
+    collection_name: str = "kefu_knowledge",
+    persist_directory: str = "./chroma_db",
+) -> int:
+    """从长文本初始化向量数据库（备用功能）
+
+    使用 RecursiveCharacterTextSplitter 自动切分文本，
+    然后使用 bge-m3 生成向量，存入 Chroma
+    """
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=300,
+        chunk_overlap=50,
+        separators=["\n\n", "\n", "。", " "],
+    )
+
+    chunks = text_splitter.split_text(long_text)
+    logger.info(f"Split text into {len(chunks)} chunks")
+
+    documents = [
+        Document(page_content=chunk, metadata={"source": "user_upload", "index": i})
+        for i, chunk in enumerate(chunks)
+    ]
+
+    embeddings = OllamaEmbeddings(
+        model=config.embedding.model,
+        base_url=config.embedding.base_url,
+    )
+
+    os.makedirs(persist_directory, exist_ok=True)
+
+    Chroma(
+        persist_directory=persist_directory, embedding_function=embeddings
+    ).delete_collection()
+
+    vector_store = Chroma.from_documents(
+        documents=documents,
+        embedding=embeddings,
+        collection_name=collection_name,
+        persist_directory=persist_directory,
+    )
+
+    logger.info(f"Vector DB initialized with {len(documents)} documents")
+    return len(documents)
+
+
+if __name__ == "__main__":
+    count = init_from_files("./data")
+    print(f"Initialized {count} documents")

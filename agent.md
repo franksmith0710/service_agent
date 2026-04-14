@@ -1,9 +1,6 @@
-### 核心必看内容
-
-### 你是一个agent开发工程师，你需要制作一个智能体客服的企业级项目，可以实现：多轮对话，用户关于商品的问题解答、查询订单、查询物流、转接人工等功能。是一个基于 FastAPI 和 LangGraph 构建的 AI 智能客服聊天机器人，采用 ReAct（推理+行动）代理模式。
-
+### 核心必看内容                                     你是资深Agent开发工程师，熟悉LangGraph、LangChain等相关技术栈，按最新版LangChain（v1.0+）写法，产出规范、可运行、注释清晰的代码，不冗余、不遗漏核心功能。请按以下需求，开发企业级AI智能客服机器人。这是一个专门针对机械革命笔记本电脑的智能客服机器人
 ### 要求如下
-#### 1. 界面：Streamlit做一个简单的聊天界面，支持用户输入、流式输出（打字机效果）
+#### 1. 界面：Streamlit做一个简单的聊天界面，支持用户输入
 ### 2. 技术栈：
    - 大模型：支持本地ollama模型的qwen3.5 4b 和硅基流动的qwen3.5 4b(OPENAI_API_KEY=sk-mkvwihbbwuvirgxkdfmonkonurkpucfvdwvbhcjqlswwpvbr
      OPENAI_BASE_URL=https://api.siliconflow.cn/v1)   把这个两个模型放置在一个文件里，只使用本地模型，我想改时我会手动改代码的
@@ -18,11 +15,16 @@
    - 多轮对话记忆，使用redis实现记忆存储
    - 严格不编造答案
    - 只回答客服问题
+   上下文管理：状态管理
+   控制流设计：流程编排
+   错误恢复：异常处理
+   反馈回路：监控告警
 ### 5.项目结构
 
 ```
 kefu_agent/
 ├── app.py                      # Streamlit Web 入口
+├── api.py                      # FastAPI 接口
 ├── src/
 │   ├── config/
 │   │   ├── settings.py          # 配置加载 (dataclass)
@@ -31,22 +33,46 @@ kefu_agent/
 │   │   └── types.py             # 数据类型定义
 │   └── services/
 │       ├── agent.py             # Agent 核心
-│       ├── llm.py             # LLM 管理
+│       ├── llm.py               # LLM 管理
 │       ├── tools.py             # 工具定义
 │       ├── memory.py            # 对话记忆
-│       └── rag.py             # RAG 知识库
+│       ├── rag.py               # RAG 知识库
+│       ├── database.py          # JSON 数据层
+│       └── intent.py            # 意图识别
+├── data/
+│   └── mock_data.json           # 模拟数据
 ├── tests/
 │   └── test_services.py         # 单元测试
 ├── .env                         # 环境变量
 ├── .env.example                 # 环境变量模板
+├── .gitignore                   # Git 忽略配置
 ├── requirements.txt             # 依赖
 └── README.md
 ```
-### 6. 代码必须：
-   - 核心真实数据可以先不写，等后续我会再添加可以使用占位符代替 。
-   - 注释清晰
-   - 最新版 LangChain 写法
-### 7. 内容不需要很全只做一个小demo试试效果先完成这些功能，其余内容等我安排，不要被我限制，自行发挥
-
-
-### 8.接入真实数据库，包括订单、物流、用户信息等
+### 6. 标准企业级客服 Agent 流程图
+Start
+  ↓
+【加载会话记忆】
+  ↓
+【意图识别节点】intent_node
+  ↓
+【路由节点】router
+  ├─ 意图 = 闲聊 / 咨询 → 【RAG 检索节点】
+  ├─ 意图 = 订单 / 物流 / 用户信息 → 【ReAct 工具调用】
+  └─ 意图 = 投诉 / 敏感 / 复杂 → 【直接转人工】
+        ↓
+【ReAct 工具调用流程】
+  ├─ 【agent_node】思考 → 决定是否调用工具
+  │        ↓ 条件边
+  └─ 有 tool_calls → 【tools_node】执行 → 返回 agent_node
+           无 → 结束
+        ↓
+【回答生成】
+        ↓
+【保存对话记忆】
+        ↓
+End
+### 7.已知数据内容(自行添加到数据库或向量数据库)
+ '''
+ 详细数据访问jxgm.md
+ '''
