@@ -50,29 +50,40 @@ kefu_agent/
 ├── requirements.txt             # 依赖
 └── README.md
 ```
-### 6. 标准企业级客服 Agent 流程图
-Start
-  ↓
-【加载会话记忆】
-  ↓
-【意图识别节点】intent_node
-  ↓
-【路由节点】router
-  ├─ 意图 = 闲聊 / 咨询 → 【RAG 检索节点】
-  ├─ 意图 = 订单 / 物流 / 用户信息 → 【ReAct 工具调用】
-  └─ 意图 = 投诉 / 敏感 / 复杂 → 【直接转人工】
-        ↓
-【ReAct 工具调用流程】
-  ├─ 【agent_node】思考 → 决定是否调用工具
-  │        ↓ 条件边
-  └─ 有 tool_calls → 【tools_node】执行 → 返回 agent_node
-            无 → 结束
-        ↓
-【回答生成】
-        ↓
-【保存对话记忆】
-        ↓
-End
+### 6. Agent 流程图
+
+```
+用户输入 → 加载记忆(Redis) → intent_node(意图识别) → router(路由)
+
+router 路由:
+├─ chat (问候/感谢/再见) → chat_node → END
+├─ product/pre_sales/after_sales → rag_node(RAG检索) → END  
+├─ order/logistics/user → agent_node(ReAct循环)
+│      ↓
+│  tools_node(工具调用) → agent_node 循环
+│      ↓
+└─ transfer (转人工) → transfer_node → END
+
+保存记忆 → END
+```
+
+### 意图识别
+
+| 意图 | 关键词 | 路由 |
+|------|--------|------|
+| chat | 你好、谢谢、再见 | chat |
+| transfer | 转人工、投诉 | transfer |
+| product | 产品、电脑、价格 | rag |
+| order | 订单号、查订单 | agent |
+| logistics | 物流、快递 | agent |
+| user | 会员、积分 | agent |
+
+### 工具
+
+- query_order: 查询订单
+- query_logistics: 查询物流
+- query_user_info: 查询用户
+- transfer_to_human: 转人工
 ### 7.已知数据内容(自行添加到数据库或向量数据库)
  '''
  详细数据访问jxgm.md

@@ -14,3 +14,4 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], "add_messages"]
     session_id: str
     intent: Optional[str]
+    rag_filter: Optional[dict]

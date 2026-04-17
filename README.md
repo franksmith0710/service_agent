@@ -64,17 +64,34 @@ kefu_agent/
 ## Agent 流程图
 
 ```
-意图识别 (intent_node)
-    ↓
-路由 (router)
-    ├─ 闲聊/咨询 → RAG 检索 → 结束
-    ├─ 订单/物流/用户信息 → Agent (ReAct)
-    │       ↓
-    │   工具调用 (tools_node)
-    │       ↓
-    │   返回 Agent 循环
-    └─ 投诉/敏感 → 转人工 (END)
+用户输入 → 加载记忆(Redis) → intent_node → router
+
+router 路由:
+├─ chat (问候/感谢) → chat_node → END
+├─ product/pre_sales/after_sales → rag_node → END
+├─ order/logistics/user → agent_node(ReAct循环) → tools_node → END
+└─ transfer → transfer_node → END
+
+保存记忆 → END
 ```
+
+### 意图路由
+
+| 意图 | 关键词 | 路由 |
+|------|--------|------|
+| chat | 你好、谢谢、再见 | chat |
+| transfer | 转人工、投诉 | transfer |
+| product | 产品、电脑、价格 | rag |
+| order | 订单号、查订单 | agent |
+| logistics | 物流、快递 | agent |
+| user | 会员、积分 | agent |
+
+### 工具
+
+- query_order: 查询订单
+- query_logistics: 查询物流
+- query_user_info: 查询用户
+- transfer_to_human: 转人工
 
 ## 快速开始
 

@@ -20,6 +20,8 @@ class Intent(Enum):
     CHAT = "chat"  # 问候闲聊
     TRANSFER_HUMAN = "transfer"  # 转人工
     PRODUCT_QUERY = "product"  # 产品咨询
+    PRE_SALES_QUERY = "pre_sales"  # 售前咨询
+    AFTER_SALES_QUERY = "after_sales"  # 售后咨询
     ORDER_QUERY = "order"  # 订单查询
     LOGISTICS_QUERY = "logistics"  # 物流查询
     USER_QUERY = "user"  # 用户信息查询
@@ -91,6 +93,40 @@ INTENT_KEYWORDS = {
         "多少钱",
         "报价",
         "优惠",
+    ],
+    # 售前咨询（保修政策、选购、驱动等）
+    Intent.PRE_SALES_QUERY: [
+        "选购",
+        "推荐",
+        "适合",
+        "哪款",
+        "系列",
+        "性价比",
+        "蛟龙",
+        "极光",
+        "耀世",
+        "无界",
+        "旷世",
+        "翼龙",
+        "深海",
+    ],
+    # 售后咨询
+    Intent.AFTER_SALES_QUERY: [
+        "保修",
+        "售后",
+        "维修",
+        "驱动",
+        "重装系统",
+        "蓝屏",
+        "死机",
+        "黑屏",
+        "开机",
+        "充电",
+        "电池",
+        "发热",
+        "风扇",
+        "温度",
+        "故障",
     ],
     # 中优先级：订单查询
     Intent.ORDER_QUERY: [
@@ -169,7 +205,15 @@ def recognize_intent(text: str) -> Intent:
     if _contains_keyword(text, INTENT_KEYWORDS[Intent.PRODUCT_QUERY]):
         return Intent.PRODUCT_QUERY
 
-    # 4. 订单查询
+    # 4. 售后咨询
+    if _contains_keyword(text, INTENT_KEYWORDS[Intent.AFTER_SALES_QUERY]):
+        return Intent.AFTER_SALES_QUERY
+
+    # 5. 售前咨询
+    if _contains_keyword(text, INTENT_KEYWORDS[Intent.PRE_SALES_QUERY]):
+        return Intent.PRE_SALES_QUERY
+
+    # 6. 订单查询
     if _contains_keyword(text, INTENT_KEYWORDS[Intent.ORDER_QUERY]):
         return Intent.ORDER_QUERY
 
@@ -219,3 +263,20 @@ def get_intent_description(text: str) -> str:
     """获取意图描述"""
     intent = recognize_intent(text)
     return intent.value
+
+
+def get_rag_filter(intent: Intent) -> Optional[dict]:
+    """根据意图获取 RAG 检索过滤条件
+
+    Args:
+        intent: 意图枚举
+
+    Returns:
+        Chroma filter dict or None
+    """
+    filter_map = {
+        Intent.PRODUCT_QUERY: {"type": "product"},
+        Intent.PRE_SALES_QUERY: {"type": "pre_sales"},
+        Intent.AFTER_SALES_QUERY: {"type": "after_sales"},
+    }
+    return filter_map.get(intent)

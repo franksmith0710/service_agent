@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 _redis_client = None
 _use_redis = False
 _memory_store: dict[str, list[BaseMessage]] = {}
+_intent_store: dict[str, str] = {}
 
 
 def _get_redis_client():
@@ -59,6 +60,7 @@ class ChatMemory:
     def __init__(self, session_id: str):
         self.session_id = session_id
         self._key = f"chat_memory:{session_id}"
+        self._intent_key = f"chat_intent:{session_id}"
 
     def _get_client(self):
         return _get_redis_client()
@@ -110,8 +112,36 @@ class ChatMemory:
             client = self._get_client()
             if client:
                 client.delete(self._key)
+                client.delete(self._intent_key)
         if self.session_id in _memory_store:
             del _memory_store[self.session_id]
+        if self.session_id in _intent_store:
+            del _intent_store[self.session_id]
+
+    def set_intent(self, intent: Optional[str]) -> None:
+        """保存意图"""
+        if _use_redis:
+            client = self._get_client()
+            if client:
+                client.set(self._intent_key, intent or "")
+        else:
+            if not hasattr(self, "_intent_store"):
+                global _intent_store
+                _intent_store = {}
+            _intent_store[self.session_id] = intent or ""
+
+    def get_intent(self) -> Optional[str]:
+        """获取上次保存的意图"""
+        if _use_redis:
+            client = self._get_client()
+            if client:
+                intent = client.get(self._intent_key)
+                if intent:
+                    return intent.decode("utf-8")
+        else:
+            global _intent_store
+            return _intent_store.get(self.session_id)
+        return None
 
     def _serialize_messages(self, messages: list[BaseMessage]) -> str:
         """序列化消息为 JSON 字符串"""

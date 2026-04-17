@@ -40,7 +40,13 @@ from src.models.types import AgentState
 
 from src.services.tools import get_all_tools
 from src.services.memory import get_memory
-from src.services.intent import Intent, recognize_intent
+from src.services.intent import (
+    Intent,
+    recognize_intent,
+    get_rag_filter,
+    extract_order_id,
+    extract_phone,
+)
 from src.services.rag import get_rag
 from src.services.validator import (
     InputValidator,
@@ -120,34 +126,69 @@ def chat_node(state: AgentState) -> AgentState:
 def intent_node(state: AgentState) -> AgentState:
     """
     意图识别节点
-    识别用户意图，设置 state.intent
+    识别用户意图，设置 state.intent 和 rag_filter
     """
     messages = state["messages"]
     last_message = messages[-1].content
 
     intent = recognize_intent(last_message)
+
     logger.info(f"Intent: {intent.value}")
 
-    return {"intent": intent.value}
+    rag_filter = get_rag_filter(intent)
+    logger.info(f"RAG filter: {rag_filter}")
+
+    return {"intent": intent.value, "rag_filter": rag_filter}
+
+
+def _rag_ask_back(intent: str) -> AgentState:
+    """RAG 检索为空时的追问"""
+    question_map = {
+        "product": "您好！请问您想咨询哪款产品的具体型号或配置呢？",
+        "pre_sales": "您好！请问您的预算和使用场景是什么呢？我可以为您推荐合适的机型。",
+        "after_sales": "您好！请描述一下您遇到的故障现象，例如蓝屏、死机、无法开机等。",
+    }
+    fallback = "您好！请问您具体想咨询什么问题呢？"
+    response_content = question_map.get(intent, fallback)
+
+    return {"messages": [AIMessage(content=response_content)]}
 
 
 def rag_node(state: AgentState) -> AgentState:
     """
-    RAG 检索节点（✅ 已修复 20015）
+    RAG 检索节点
     """
     messages = state["messages"]
-    user_query = messages[-1].content  # 真实用户问题
+    user_query = messages[-1].content
+    intent = state.get("intent")
 
-    # RAG 检索
+    rag_filter = state.get("rag_filter")
+    logger.info(f"RAG filter: {rag_filter}")
+
+    history_ai = []
+    for msg in messages[:-1]:
+        if isinstance(msg, AIMessage):
+            history_ai.append(msg.content)
+    last_ai_reply = history_ai[-1] if history_ai else ""
+
+    PRODUCT_KEYWORDS = ["耀世", "蛟龙", "极光", "无界", "旷世", "翼龙", "深海泰坦"]
+    has_specific_product = any(kw in user_query for kw in PRODUCT_KEYWORDS)
+
+    if not has_specific_product:
+        return _rag_ask_back(intent)
+
     try:
         rag = get_rag()
-        docs = rag.similarity_search(user_query, k=2)
-        rag_context = "\n".join([d.page_content for d in docs]) if docs else ""
+        docs = rag.similarity_search(user_query, k=2, filter=rag_filter)
     except Exception as e:
         logger.warning(f"RAG search failed: {e}")
-        rag_context = ""
+        docs = []
 
-    # 构建回答
+    if not docs:
+        return _rag_ask_back(intent)
+
+    rag_context = "\n".join([d.page_content for d in docs])
+
     system_prompt = f"""你是一个智能客服助手。请根据以下知识库内容回答用户问题。
 
 知识库：
@@ -157,9 +198,20 @@ def rag_node(state: AgentState) -> AgentState:
 - 只根据知识库内容回答，不要编造
 - 如果知识库没有相关信息，请如实告知用户"""
 
+    if last_ai_reply:
+        system_prompt += f"""
+
+参考上一轮对话：
+{last_ai_reply}
+
+用户当前问题：{user_query}"""
+    else:
+        system_prompt += f"""
+
+用户当前问题：{user_query}"""
+
     llm_with_tools = get_llm_with_tools()
 
-    # ✅ 【修复】最后一条 100% 是真实用户消息
     llm_messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_query),
@@ -177,6 +229,12 @@ def agent_node(state: AgentState) -> AgentState:
     last_msg = messages[-1]
     llm_with_tools = get_llm_with_tools()
 
+    history_ai = []
+    for msg in messages[:-1]:
+        if isinstance(msg, AIMessage):
+            history_ai.append(msg.content)
+    last_ai_reply = history_ai[-1] if history_ai else ""
+
     if isinstance(last_msg, ToolMessage):
         system_prompt = """你是智能客服助手，根据工具结果自然回答用户。
 要求：简洁、专业、直接回答用户问题。
@@ -190,11 +248,35 @@ def agent_node(state: AgentState) -> AgentState:
         return {"messages": [response]}
 
     user_query = messages[-1].content
-    system_prompt = """你是一个智能客服助手。根据用户问题，直接调用工具查询。
+    intent = state.get("intent")
+
+    order_id = extract_order_id(user_query)
+    phone = extract_phone(user_query)
+
+    if intent == "order" and not order_id and not phone:
+        return {"messages": [AIMessage(content="请提供订单号或手机号以便查询订单")]}
+    if intent == "logistics" and not order_id and not phone:
+        return {"messages": [AIMessage(content="请提供订单号或手机号以便查询物流")]}
+    if intent == "user" and not phone:
+        return {"messages": [AIMessage(content="请提供手机号以便查询用户信息")]}
+
+    system_prompt = """��是一个智能客服助手。根据用户问题，直接调用工具查询。
 如果需要查询订单，请调用 query_order 工具。
 如果需要查询物流，请调用 query_logistics 工具。
 如果需要查询用户信息，请调用 query_user_info 工具。
 不要引导用户，直接回答问题。"""
+
+    if last_ai_reply:
+        system_prompt += f"""
+
+参考对话：
+{last_ai_reply}
+
+用户当前问题：{user_query}"""
+    else:
+        system_prompt += f"""
+
+用户当前问题：{user_query}"""
 
     llm_messages = [
         SystemMessage(content=system_prompt),
@@ -279,16 +361,16 @@ def create_agent_graph():
         if not intent:
             return "rag"
 
-        # 转人工
+        # 转人工 → 工具调用
         if intent == "transfer":
-            return "transfer"
+            return "agent"
 
         # 聊天节点（问候/闲聊）
         if intent == "chat":
             return "chat"
 
-        # 产品咨询 → RAG
-        if intent == "product":
+        # 产品/售前/售后咨询 → RAG（带 filter）
+        if intent in ["product", "pre_sales", "after_sales"]:
             return "rag"
 
         # 订单、物流、用户 → 工具调用
@@ -310,6 +392,7 @@ def create_agent_graph():
 
     graph.add_edge("transfer", END)
     graph.add_edge("chat", END)
+    graph.add_edge("rag", END)
 
     def should_call_tool(state: AgentState) -> str:
         messages = state.get("messages", [])
@@ -374,24 +457,34 @@ def run_agent(
 
     memory = get_memory(session_id)
     history = memory.get_messages()
+    prev_intent = memory.get_intent()
 
     initial_state = {
         "messages": history + [HumanMessage(content=user_input)],
         "session_id": session_id,
-        "intent": None,
+        "intent": prev_intent,
     }
 
     llm_with_tools = get_llm_with_tools()
     full_response = ""
+    response_done = False
+    current_intent = None
 
     for event in get_agent_graph().stream(initial_state):
         if "intent" in event:
+            current_intent = event["intent"].get("intent")
             continue
+
+        if response_done:
+            break
 
         if "tools" in event:
             continue
 
         for node_name in ["chat", "rag", "agent"]:
+            if response_done:
+                break
+
             if node_name in event:
                 messages = event[node_name].get("messages", [])
                 if messages:
@@ -402,15 +495,19 @@ def run_agent(
                     if msg.content:
                         content = msg.content
                         if enable_stream:
-                            for chunk in llm_with_tools.stream(content):
-                                if chunk.content:
-                                    yield chunk.content
+                            for char in content:
+                                yield char
                         else:
                             yield content
                         full_response = content
+                        response_done = True
                         break
                 break
 
     memory.add_user_message(user_input)
     memory.add_ai_message(full_response)
+
+    if current_intent:
+        memory.set_intent(current_intent)
+
     logger.info(f"Agent response completed for session {session_id}")
