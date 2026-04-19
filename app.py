@@ -74,7 +74,7 @@ def main():
             full_response = ""
 
             try:
-                with st.spinner("🤔 思考中..."):
+                with st.spinner("正在思考中..."):
                     for chunk in run_agent(st.session_state.session_id, prompt):
                         full_response += chunk
                         message_placeholder.markdown(full_response)

@@ -21,13 +21,6 @@ logger = get_logger(__name__)
 
 _rag_instance: Optional["KnowledgeBase"] = None
 
-CATEGORY_MAP = {
-    "kb_brand.txt": "brand",
-    "kb_products.txt": "product",
-    "kb_pre_sales.txt": "pre_sales",
-    "kb_after_sales.txt": "after_sales",
-}
-
 
 def _compute_content_hash(content: str) -> str:
     return hashlib.md5(content.encode("utf-8")).hexdigest()
@@ -211,7 +204,7 @@ def get_rag() -> KnowledgeBase:
     return _rag_instance
 
 
-def init_from_kb(
+def init_from_files(
     data_dir: str = "./data", collection_name: str = "kefu_knowledge"
 ) -> int:
     """从 data/kb_*.txt 初始化向量数据库
@@ -277,15 +270,6 @@ def init_from_kb(
     return count
 
 
-# 兼容旧函数名
-def init_from_jxgm(*args, **kwargs):
-    return init_from_kb(*args, **kwargs)
-
-
-def init_from_files(*args, **kwargs):
-    return init_from_kb(*args, **kwargs)
-
-
 if __name__ == "__main__":
-    count = init_from_kb("./data")
+    count = init_from_files("./data")
     print(f"Initialized {count} documents")

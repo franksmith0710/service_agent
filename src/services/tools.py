@@ -5,10 +5,9 @@ Agent 工具模块
 带有完整的异常处理
 """
 
-import re
 import json
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 from langchain_core.tools import tool
 
 from src.services.postgres import (

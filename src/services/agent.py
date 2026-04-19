@@ -1,29 +1,16 @@
 """
 Agent 服务模块
 
-基于 LangGraph StateGraph 的 ReAct 代理
-
-企业级客服流程：
-1. intent_node - 意图识别
-2. rag_node - 检索 FAQ
-3. agent_node - 思考 & 决定 tool_call
-4. tools_node - 执行工具
-5. conditional edge - 循环 ReAct
-
-工作流程：
-- intent_node → router
-- router → rag_node（闲聊/咨询）
-- router → agent_node（订单/物流/用户信息）
-- router → 直接转人工（投诉/敏感/复杂）
-- agent_node → tools_node（有tool_calls）→ agent_node
-- agent_node → 结束（无tool_calls）
-- tools_node → 回答生成
+两层级 LLM 架构：
+- 决策 LLM (run_agent 入口)：意图识别、路由决策
+- Graph 执行层：RAG 检索 + 工具执行（0 LLM）
+- 生成 LLM (run_agent 末尾)：整合所有原料生成回答
 """
 
 import os
 import json
 import logging
-from typing import Generator, Any, Dict
+from typing import Generator
 
 from langchain_core.messages import (
     BaseMessage,
@@ -32,27 +19,20 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.runnables import RunnableConfig
 
 from src.config.settings import config
 from src.config.logger import get_logger
 from src.models.types import AgentState
 
-from src.services.tools import get_all_tools
 from src.services.memory import get_memory
 from src.services.intent import (
-    Intent,
-    recognize_intent,
-    get_rag_filter,
-    extract_order_id,
-    extract_phone,
+    llm_dispatch,
+    extract_all_slots,
+    resolve_coreference,
+    update_context_entity,
+    is_interrupt,
 )
 from src.services.rag import get_rag
-from src.services.validator import (
-    InputValidator,
-    ExceptionHandler,
-    ValidationError,
-)
 
 logger = get_logger(__name__)
 
@@ -73,6 +53,17 @@ from src.services.tools import (
     transfer_to_human,
 )
 
+# ==================== 工具失败固定策略 ====================
+
+TOOL_ERROR_STRATEGY = {
+    "query_order": "抱歉，订单查询服务暂时不可用，请稍后重试或拨打客服热线 400-990-5898",
+    "query_logistics": "抱歉，物流查询服务暂时不可用，请稍后重试",
+    "query_user_info": "抱歉，用户信息查询服务暂时不可用",
+    "transfer_to_human": "抱歉，转接服务暂时不可用，请拨打客服热线 400-990-5898",
+}
+
+# ==================== 工具函数映射 ====================
+
 TOOL_MAP = {
     "query_order": query_order,
     "query_logistics": query_logistics,
@@ -90,213 +81,78 @@ from src.services.llm import get_llm_with_tools
 
 
 def transfer_node(state: AgentState) -> AgentState:
-    """
-    转人工节点
-    """
-    return {
-        "messages": [
-            AIMessage(
-                content="已为您转接人工客服，请稍候...\n人工客服工作时间: 周一至周五 9:00-18:00\n客服热线: 400-990-5898"
-            )
-        ]
-    }
+    """转人工节点 - 已移除，功能在入口处理"""
+    return {"session_status": "transfering"}
 
 
 def chat_node(state: AgentState) -> AgentState:
-    """聊天节点 - 处理问候、闲聊、礼貌对话"""
-    messages = state["messages"]
-    user_input = messages[-1].content.strip().lower()
+    """聊天节点 - 已移除，功能在入口处理"""
+    return {"session_status": "idle"}
 
-    greetings = {"你好", "您好", "hi", "hello", "在吗", "在么", "有人吗", "哈喽"}
-    thanks = {"谢谢", "感谢", "谢了", "多谢"}
-    goodbyes = {"再见", "拜拜", "bye", "88", "回头聊"}
 
-    if any(word in user_input for word in greetings):
-        content = "您好！我是智能客服，有什么可以帮您的吗？😊"
-    elif any(word in user_input for word in thanks):
-        content = "不客气！很高兴能帮到您~"
-    elif any(word in user_input for word in goodbyes):
-        content = "再见！感谢您的咨询，祝您生活愉快！👋"
-    else:
-        content = "您好！我可以帮您查询产品、售后、订单、物流等问题，请问需要什么帮助？"
-
-    return {"messages": [AIMessage(content=content)]}
+def clarify_node(state: AgentState) -> AgentState:
+    """追问节点 - 已在外部处理，这里只做状态传递"""
+    return {
+        "session_status": state.get("session_status", "waiting_slot"),
+    }
 
 
 def intent_node(state: AgentState) -> AgentState:
-    """
-    意图识别节点
-    识别用户意图，设置 state.intent 和 rag_filter
-    """
-    messages = state["messages"]
-    last_message = messages[-1].content
-
-    intent = recognize_intent(last_message)
-
-    logger.info(f"Intent: {intent.value}")
-
-    rag_filter = get_rag_filter(intent)
-    logger.info(f"RAG filter: {rag_filter}")
-
-    return {"intent": intent.value, "rag_filter": rag_filter}
-
-
-def _rag_ask_back(intent: str) -> AgentState:
-    """RAG 检索为空时的追问"""
-    question_map = {
-        "product": "您好！请问您想咨询哪款产品的具体型号或配置呢？",
-        "pre_sales": "您好！请问您的预算和使用场景是什么呢？我可以为您推荐合适的机型。",
-        "after_sales": "您好！请描述一下您遇到的故障现象，例如蓝屏、死机、无法开机等。",
-    }
-    fallback = "您好！请问您具体想咨询什么问题呢？"
-    response_content = question_map.get(intent, fallback)
-
-    return {"messages": [AIMessage(content=response_content)]}
+    """简化后的意图节点 - 只做状态传递"""
+    return {"session_status": state.get("session_status", "idle")}
 
 
 def rag_node(state: AgentState) -> AgentState:
-    """
-    RAG 检索节点
-    """
+    """RAG 检索节点 - 只同步检索，返回原始文档"""
     messages = state["messages"]
     user_query = messages[-1].content
-    intent = state.get("intent")
 
-    rag_filter = state.get("rag_filter")
-    logger.info(f"RAG filter: {rag_filter}")
-
-    history_ai = []
-    for msg in messages[:-1]:
-        if isinstance(msg, AIMessage):
-            history_ai.append(msg.content)
-    last_ai_reply = history_ai[-1] if history_ai else ""
-
-    PRODUCT_KEYWORDS = ["耀世", "蛟龙", "极光", "无界", "旷世", "翼龙", "深海泰坦"]
-    has_specific_product = any(kw in user_query for kw in PRODUCT_KEYWORDS)
-
-    if not has_specific_product:
-        return _rag_ask_back(intent)
+    logger.info(f"RAG search: {user_query[:30]}...")
 
     try:
         rag = get_rag()
-        docs = rag.similarity_search(user_query, k=2, filter=rag_filter)
+        docs = rag.similarity_search(user_query, k=2)
+        rag_docs = [d.page_content for d in docs]
     except Exception as e:
         logger.warning(f"RAG search failed: {e}")
-        docs = []
+        rag_docs = []
 
-    if not docs:
-        return _rag_ask_back(intent)
+    logger.info(f"RAG docs: {len(rag_docs)}")
 
-    rag_context = "\n".join([d.page_content for d in docs])
+    return {"rag_docs": rag_docs, "session_status": "idle"}
 
-    system_prompt = f"""你是一个智能客服助手。请根据以下知识库内容回答用户问题。
 
-知识库：
-{rag_context}
-
-要求：
-- 只根据知识库内容回答，不要编造
-- 如果知识库没有相关信息，请如实告知用户"""
-
-    if last_ai_reply:
-        system_prompt += f"""
-
-参考上一轮对话：
-{last_ai_reply}
-
-用户当前问题：{user_query}"""
-    else:
-        system_prompt += f"""
-
-用户当前问题：{user_query}"""
-
-    llm_with_tools = get_llm_with_tools()
-
-    llm_messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_query),
-    ]
-
-    response = llm_with_tools.invoke(llm_messages)
-    return {"messages": [response]}
+MAX_TURNS = 8
 
 
 def agent_node(state: AgentState) -> AgentState:
-    """
-    Agent 节点（ReAct 工具调用）
-    """
-    messages = state["messages"]
+    """Agent 节点 - ReAct 循环继续"""
+    messages = state.get("messages", [])
+    if not messages:
+        return {"session_status": "idle"}
+
     last_msg = messages[-1]
-    llm_with_tools = get_llm_with_tools()
-
-    history_ai = []
-    for msg in messages[:-1]:
-        if isinstance(msg, AIMessage):
-            history_ai.append(msg.content)
-    last_ai_reply = history_ai[-1] if history_ai else ""
-
     if isinstance(last_msg, ToolMessage):
-        system_prompt = """你是智能客服助手，根据工具结果自然回答用户。
-要求：简洁、专业、直接回答用户问题。
-"""
-        context_msg = f"工具查询结果：{last_msg.content}"
-        llm_messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=context_msg),
-        ]
-        response = llm_with_tools.invoke(llm_messages)
-        return {"messages": [response]}
+        return {"session_status": "idle"}
 
-    user_query = messages[-1].content
-    intent = state.get("intent")
-
-    order_id = extract_order_id(user_query)
-    phone = extract_phone(user_query)
-
-    if intent == "order" and not order_id and not phone:
-        return {"messages": [AIMessage(content="请提供订单号或手机号以便查询订单")]}
-    if intent == "logistics" and not order_id and not phone:
-        return {"messages": [AIMessage(content="请提供订单号或手机号以便查询物流")]}
-    if intent == "user" and not phone:
-        return {"messages": [AIMessage(content="请提供手机号以便查询用户信息")]}
-
-    system_prompt = """��是一个智能客服助手。根据用户问题，直接调用工具查询。
-如果需要查询订单，请调用 query_order 工具。
-如果需要查询物流，请调用 query_logistics 工具。
-如果需要查询用户信息，请调用 query_user_info 工具。
-不要引导用户，直接回答问题。"""
-
-    if last_ai_reply:
-        system_prompt += f"""
-
-参考对话：
-{last_ai_reply}
-
-用户当前问题：{user_query}"""
-    else:
-        system_prompt += f"""
-
-用户当前问题：{user_query}"""
-
-    llm_messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_query),
-    ]
-
-    response = llm_with_tools.invoke(llm_messages)
-    return {"messages": [response]}
+    return {"session_status": "idle"}
 
 
 def tools_node(state: AgentState) -> AgentState:
     """
     工具执行节点
+    更新槽位、任务状态、last_tool
     """
     messages = state["messages"]
     last_msg = messages[-1]
+    session_id = state.get("session_id", "")
 
     tool_calls = getattr(last_msg, "tool_calls", None)
     if not tool_calls:
-        return {"messages": [AIMessage(content="无工具调用")]}
+        return {
+            "messages": [AIMessage(content="无工具调用")],
+            "session_status": "idle",
+        }
 
     tool_call = tool_calls[0]
     tool_name = tool_call["name"]
@@ -312,21 +168,30 @@ def tools_node(state: AgentState) -> AgentState:
 
     logger.info(f"Tool call: {tool_name}, args: {tool_args}")
 
+    new_slots = {}
+    if "order_id" in tool_args:
+        new_slots["order_id"] = tool_args["order_id"]
+    if "phone" in tool_args:
+        new_slots["phone"] = tool_args["phone"]
+
     tool_func = TOOL_MAP.get(tool_name)
     if tool_func:
         try:
             tool_result = tool_func.invoke(tool_args)
         except Exception as e:
             logger.error(f"Tool call failed: {e}")
-            tool_result = f"工具执行失败: {str(e)}"
-        tool_response = f"为您查询到：\n{tool_result}"
+            tool_result = TOOL_ERROR_STRATEGY.get(tool_name, "服务暂时不可用")
+
         return {
             "messages": [
                 ToolMessage(
-                    content=tool_response,
+                    content=tool_result,
                     tool_call_id=tool_call_id,
                 )
-            ]
+            ],
+            "tool_results": [{"name": tool_name, "result": tool_result}],
+            "slots": new_slots,
+            "session_status": "idle",
         }
     else:
         return {
@@ -335,7 +200,9 @@ def tools_node(state: AgentState) -> AgentState:
                     content=f"未知工具: {tool_name}",
                     tool_call_id=tool_call_id,
                 )
-            ]
+            ],
+            "tool_results": [{"name": tool_name, "result": f"未知工具: {tool_name}"}],
+            "session_status": "idle",
         }
 
 
@@ -344,54 +211,33 @@ def tools_node(state: AgentState) -> AgentState:
 
 def create_agent_graph():
     from langgraph.graph import StateGraph, END
+    from langgraph.constants import Send
 
     graph = StateGraph(AgentState)
 
     graph.add_node("intent", intent_node)
-    graph.add_node("chat", chat_node)
     graph.add_node("rag", rag_node)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tools_node)
-    graph.add_node("transfer", transfer_node)
 
     graph.set_entry_point("intent")
 
-    def router(state: AgentState) -> str:
-        intent = state.get("intent")
-        if not intent:
+    def simple_router(state: AgentState) -> str:
+        """根据 intent 决定路由"""
+        intent = state.get("intent", "chat")
+        if intent == "product":
             return "rag"
-
-        # 转人工 → 工具调用
-        if intent == "transfer":
-            return "agent"
-
-        # 聊天节点（问候/闲聊）
-        if intent == "chat":
-            return "chat"
-
-        # 产品/售前/售后咨询 → RAG（带 filter）
-        if intent in ["product", "pre_sales", "after_sales"]:
-            return "rag"
-
-        # 订单、物流、用户 → 工具调用
-        if intent in ["order", "logistics", "user"]:
-            return "agent"
-
-        return "chat"
+        return "agent"
 
     graph.add_conditional_edges(
         "intent",
-        router,
+        simple_router,
         {
-            "chat": "chat",
             "rag": "rag",
             "agent": "agent",
-            "transfer": "transfer",
         },
     )
 
-    graph.add_edge("transfer", END)
-    graph.add_edge("chat", END)
     graph.add_edge("rag", END)
 
     def should_call_tool(state: AgentState) -> str:
@@ -435,79 +281,197 @@ def run_agent(
 ) -> Generator[str, None, None]:
     """
     运行 Agent 处理用户输入
-
-    Args:
-        session_id: 会话 ID
-        user_input: 用户输入
-        enable_stream: 是否启用流式输出
-
-    Yields:
-        流式输出的文本片段
-
-    Raises:
-        ValidationError: 输入验证失败
+    核心：在 Graph 外完成决策，Graph 只做执行
+    加载/保存 slots、context_entity、session_status、turn_count
     """
-    validation_result = InputValidator.validate_message(user_input)
-    if not validation_result.is_valid:
-        raise ValidationError(validation_result.error_message)
-
-    validation_result = InputValidator.validate_session_id(session_id)
-    if not validation_result.is_valid:
-        raise ValidationError(validation_result.error_message)
-
     memory = get_memory(session_id)
     history = memory.get_messages()
     prev_intent = memory.get_intent()
+    saved_slots = memory.get_slots()
+    saved_context_entity = memory.get_context_entity()
+    prev_session_status = memory.get_session_status()
+    prev_turn_count = memory.get_turn_count()
 
-    initial_state = {
+    if is_interrupt(user_input):
+        logger.info(f"User interrupted, saving session state")
+        memory.set_session_status("idle")
+        slots = extract_all_slots(user_input)
+        merged_slots = {**saved_slots, **slots}
+        new_context_entity = update_context_entity(merged_slots, saved_context_entity)
+        memory.add_slots(merged_slots)
+        memory.add_context_entity(new_context_entity)
+        yield "好的，保存进度。"
+        return
+
+    if saved_context_entity:
+        user_input = resolve_coreference(user_input, saved_context_entity)
+        logger.info(f"Coreference resolved: {user_input}")
+
+    raw_state = {
         "messages": history + [HumanMessage(content=user_input)],
         "session_id": session_id,
-        "intent": prev_intent,
+        "slots": saved_slots,
+        "context_entity": saved_context_entity,
+        "turn_count": prev_turn_count,
     }
 
+    dispatch_result = llm_dispatch(raw_state)
+    dispatch_reason = dispatch_result.get("reason", "")
+    need_rag = dispatch_result.get("need_rag", False)
+    need_tool = dispatch_result.get("need_tool", False)
+    need_clarify = dispatch_result.get("need_clarify", False)
+    need_transfer = dispatch_result.get("need_transfer", False)
+    tool_call = dispatch_result.get("tool_call")
+
+    logger.info(
+        f"LLM dispatch: need_rag={need_rag}, need_tool={need_tool}, "
+        f"tool_call={tool_call}, reason={dispatch_reason}"
+    )
+
+    intent = "product" if need_rag else "order"
+
+    slots = extract_all_slots(user_input)
+    if tool_call and tool_call.get("args"):
+        slots = {**slots, **tool_call.get("args", {})}
+    merged_slots = {**saved_slots, **slots}
+    new_context_entity = update_context_entity(merged_slots, saved_context_entity)
+
+    turn_count = prev_turn_count + 1
+
+    messages = [HumanMessage(content=user_input)]
+    if need_tool and tool_call:
+        messages.append(
+            AIMessage(content="", tool_calls=[tool_call])
+        )
+
+    initial_state = {
+        "messages": messages,
+        "session_id": session_id,
+        "intent": intent,
+        "rag_docs": [],
+        "tool_results": [],
+        "slots": merged_slots,
+        "context_entity": new_context_entity,
+        "session_status": "waiting_slot" if need_clarify else "idle",
+        "turn_count": turn_count,
+    }
+
+    if need_clarify:
+        clarify_prompt = dispatch_result.get("clarify_prompt", "请问您具体想咨询什么？")
+        yield clarify_prompt
+        memory.add_user_message(user_input)
+        memory.set_intent(intent)
+        memory.add_slots(merged_slots)
+        memory.add_context_entity(new_context_entity)
+        memory.set_session_status("waiting_slot")
+        memory.increment_turn()
+        return
+
+    if need_transfer:
+        yield "已为您转接人工客服，请稍候...\n人工客服工作时间: 周一至周五 9:00-18:00\n客服热线: 400-990-5898"
+        memory.add_user_message(user_input)
+        memory.set_intent("transfer")
+        memory.set_session_status("transfering")
+        memory.increment_turn()
+        return
+
+    if not need_rag and not need_tool:
+        chat_greetings = {"你好", "您好", "hi", "hello", "在吗", "在么", "有人吗", "哈喽"}
+        chat_thanks = {"谢谢", "感谢", "谢了", "多谢"}
+        chat_goodbyes = {"再见", "拜拜", "bye", "88", "回头聊"}
+        user_lower = user_input.strip().lower()
+        if any(word in user_lower for word in chat_greetings):
+            yield "您好！我是智能客服，有什么可以帮您的吗？😊"
+        elif any(word in user_lower for word in chat_thanks):
+            yield "不客气！很高兴能帮到您~"
+        elif any(word in user_lower for word in chat_goodbyes):
+            yield "再见！感谢您的咨询，祝您生活愉快！👋"
+        else:
+            yield "您好！我可以帮您查询产品、售后、订单、物流等问题，请问需要什么帮助？"
+        memory.add_user_message(user_input)
+        memory.add_ai_message("")
+        memory.set_intent("chat")
+        memory.increment_turn()
+        return
+
     llm_with_tools = get_llm_with_tools()
-    full_response = ""
-    response_done = False
-    current_intent = None
+    final_rag_docs = []
+    final_tool_results = []
+    final_session_status = "idle"
+    current_intent = initial_state.get("intent")
+    final_slots = {}
+    final_context_entity = initial_state.get("context_entity", {})
 
-    for event in get_agent_graph().stream(initial_state):
+    agent_graph = get_agent_graph()
+    for event in agent_graph.stream(initial_state):
         if "intent" in event:
-            current_intent = event["intent"].get("intent")
-            continue
-
-        if response_done:
-            break
-
+            final_session_status = event["intent"].get("session_status", "idle")
+        if "rag" in event:
+            final_rag_docs = event["rag"].get("rag_docs", [])
         if "tools" in event:
-            continue
+            tool_results = event["tools"].get("tool_results", [])
+            final_tool_results.extend(tool_results)
+            tools_slots = event["tools"].get("slots", {})
+            if tools_slots:
+                final_slots = tools_slots
 
-        for node_name in ["chat", "rag", "agent"]:
-            if response_done:
-                break
+    if not need_rag and not need_tool:
+        chat_greetings = {"你好", "您好", "hi", "hello", "在吗", "在么", "有人吗", "哈喽"}
+        chat_thanks = {"谢谢", "感谢", "谢了", "多谢"}
+        chat_goodbyes = {"再见", "拜拜", "bye", "88", "回头聊"}
+        user_lower = user_input.strip().lower()
+        if any(word in user_lower for word in chat_greetings):
+            final_response_text = "您好！我是智能客服，有什么可以帮您的吗？😊"
+        elif any(word in user_lower for word in chat_thanks):
+            final_response_text = "不客气！很高兴能帮到您~"
+        elif any(word in user_lower for word in chat_goodbyes):
+            final_response_text = "再见！感谢您的咨询，祝您生活愉快！👋"
+        else:
+            final_response_text = "您好！我可以帮您查询产品、售后、订单、物流等问题，请问需要什么帮助？"
+    else:
+        llm_messages = [
+            SystemMessage(content="你是机械革命官方客服，仅使用提供的资料回答，不编造。")
+        ]
 
-            if node_name in event:
-                messages = event[node_name].get("messages", [])
-                if messages:
-                    msg = messages[-1]
-                    if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        continue
+        if history:
+            llm_messages.extend(history)
 
-                    if msg.content:
-                        content = msg.content
-                        if enable_stream:
-                            for char in content:
-                                yield char
-                        else:
-                            yield content
-                        full_response = content
-                        response_done = True
-                        break
-                break
+        rag_context = "\n".join(final_rag_docs) if need_rag else ""
+        if rag_context:
+            llm_messages.append(HumanMessage(content=f"参考资料：\n{rag_context}"))
+
+        for tr in final_tool_results:
+            llm_messages.append(
+                ToolMessage(content=tr.get("result", ""), tool_call_id=tr.get("name", ""))
+            )
+
+        llm_messages.append(HumanMessage(content=user_input))
+
+        final_response = llm_with_tools.invoke(llm_messages)
+        final_response_text = final_response.content
+
+    if enable_stream:
+        for char in final_response_text:
+            yield char
+    else:
+        yield final_response_text
 
     memory.add_user_message(user_input)
-    memory.add_ai_message(full_response)
+    memory.add_ai_message(final_response_text)
 
     if current_intent:
         memory.set_intent(current_intent)
 
-    logger.info(f"Agent response completed for session {session_id}")
+    if final_slots:
+        memory.add_slots(final_slots)
+
+    if final_context_entity:
+        memory.add_context_entity(final_context_entity)
+
+    memory.set_session_status(final_session_status)
+    memory.increment_turn()
+
+    logger.info(
+        f"Agent response completed for session {session_id}, "
+        f"intent={current_intent}, session_status={final_session_status}, slots={final_slots}"
+    )

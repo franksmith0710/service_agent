@@ -1,231 +1,232 @@
 """
-意图识别模块
+意图识别与调度模块
 
-基于关键词精确匹配的意图识别
-优先级：CHAT > TRANSFER > PRODUCT > ORDER > LOGISTICS > USER > UNKNOWN
+基于 LLM 的动态调度决策
+支持：RAG / Tool / 混合 / 追问 / 转人工
 """
 
+import json
 import re
-from enum import Enum
-from typing import Optional
+import logging
+from typing import Optional, List, Any
+
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config.logger import get_logger
+from src.models.types import AgentState, DispatchResult
 
 logger = get_logger(__name__)
 
+DISPATCHER_PROMPT = """你是一个智能客服调度专家。根据用户输入和上下文，做出调度决策。
 
-class Intent(Enum):
-    """意图枚举"""
+决策维度（全部必填）：
+- need_rag: 是否需要 RAG 检索产品/售前/售后信息
+- need_tool: 是否需要调用工具查询订单/物流/用户
+- need_clarify: 是否需要追问澄清用户意图
+- need_transfer: 是否直接转人工
+- tool_call: 如果 need_tool=true，必须输出具体工具调用（name + args）
 
-    CHAT = "chat"  # 问候闲聊
-    TRANSFER_HUMAN = "transfer"  # 转人工
-    PRODUCT_QUERY = "product"  # 产品咨询
-    PRE_SALES_QUERY = "pre_sales"  # 售前咨询
-    AFTER_SALES_QUERY = "after_sales"  # 售后咨询
-    ORDER_QUERY = "order"  # 订单查询
-    LOGISTICS_QUERY = "logistics"  # 物流查询
-    USER_QUERY = "user"  # 用户信息查询
-    UNKNOWN = "unknown"  # 未知
+输出格式（JSON，必须严格按格式）：
+{{
+    "need_rag": true/false,
+    "need_tool": true/false,
+    "need_clarify": false,
+    "need_transfer": false,
+    "tool_call": {{
+        "name": "query_order",
+        "args": {{"order_id": "xxxx", "phone": "xxxx"}}
+    }},
+    "clarify_prompt": "",
+    "reason": "决策理由"
+}}
 
-
-# ============ 关键词匹配（按优先级排序） ============
-
-INTENT_KEYWORDS = {
-    # 最高优先级：问候闲聊
-    Intent.CHAT: [
-        "你好",
-        "您好",
-        "嗨",
-        "hi",
-        "hello",
-        "在吗",
-        "谢谢",
-        "感谢",
-        "再见",
-        "bye",
-        "拜拜",
-        "早上好",
-        "晚上好",
-        "晚安",
-    ],
-    # 高优先级：转人工
-    Intent.TRANSFER_HUMAN: [
-        "转人工",
-        "转接人工",
-        "人工客服",
-        "找真人",
-        "投诉",
-        "差评",
-        "我要投诉",
-        "客服电话",
-        "找客服",
-        "找领导",
-        "找老板",
-    ],
-    # 中高优先级：产品咨询（先于订单，防止误匹配）
-    Intent.PRODUCT_QUERY: [
-        "商品",
-        "产品",
-        "介绍",
-        "推荐",
-        "配置",
-        "怎么样",
-        "好不好",
-        "值不值",
-        "性价比",
-        "蛟龙",
-        "极光",
-        "耀世",
-        "无界",
-        "旷世",
-        "翼龙",
-        "深海",
-        "电脑",
-        "笔记本",
-        "游戏本",
-        "轻薄本",
-        "cpu",
-        "显卡",
-        "内存",
-        "硬盘",
-        "屏幕",
-        "价格",
-        "多少钱",
-        "报价",
-        "优惠",
-    ],
-    # 售前咨询（保修政策、选购、驱动等）
-    Intent.PRE_SALES_QUERY: [
-        "选购",
-        "推荐",
-        "适合",
-        "哪款",
-        "系列",
-        "性价比",
-        "蛟龙",
-        "极光",
-        "耀世",
-        "无界",
-        "旷世",
-        "翼龙",
-        "深海",
-    ],
-    # 售后咨询
-    Intent.AFTER_SALES_QUERY: [
-        "保修",
-        "售后",
-        "维修",
-        "驱动",
-        "重装系统",
-        "蓝屏",
-        "死机",
-        "黑屏",
-        "开机",
-        "充电",
-        "电池",
-        "发热",
-        "风扇",
-        "温度",
-        "故障",
-    ],
-    # 中优先级：订单查询
-    Intent.ORDER_QUERY: [
-        "订单号",
-        "订单状态",
-        "订单详情",
-        "我的订单",
-        "查订单",
-        "看订单",
-        "订单查询",
-    ],
-    # 中优先级：物流查询
-    Intent.LOGISTICS_QUERY: [
-        "物流",
-        "快递",
-        "发货",
-        "到哪了",
-        "物流信息",
-        "快递单号",
-        "物流单号",
-        "发货了吗",
-    ],
-    # 低优先级：用户信息
-    Intent.USER_QUERY: [
-        "会员",
-        "积分",
-        "用户信息",
-        "我的资料",
-        "账号",
-        "个人信息",
-        "等级",
-    ],
-}
+决策规则：
+1. 产品/售前/售后咨询 → need_rag=true
+2. 订单/物流/用户查询 → need_tool=true（必须同时输出 tool_call）
+3. 两者都有 → need_rag=true, need_tool=true（tool_call 只给 need_tool=true 的场景）
+4. 意图不明/信息不足 → need_clarify=true
+5. 投诉/转人工/复杂问题 → need_transfer=true
+6. 轮次>=8 → 优先转人工
+7. tool_call 只在 need_tool=true 时必填，其他情况为 null
+8. 返回纯 JSON，不要其他内容"""
 
 
-def _normalize_text(text: str) -> str:
-    """标准化文本"""
-    text = text.lower().strip()
-    text = text.replace("（", "(").replace("）", ")")
-    text = text.replace("？", "?").replace("！", "!")
-    text = re.sub(r"\s+", " ", text)
-    return text
+def _build_context(state: AgentState) -> str:
+    """构建上下文信息"""
+    messages = state["messages"]
+    history_parts = []
+
+    for msg in messages[:-1]:
+        if hasattr(msg, "content") and msg.content:
+            role = "用户" if msg.type == "human" else "客服"
+            history_parts.append(f"{role}: {msg.content}")
+
+    history = "\n".join(history_parts[-6:]) if history_parts else "无历史对话"
+
+    slots = state.get("slots", {})
+    task_state = state.get("task_state", "pending")
+    turn_count = state.get("turn_count", 0)
+
+    slots_str = json.dumps(slots, ensure_ascii=False) if slots else "无"
+
+    context = f"""历史对话：{history}
+已提取槽位：{slots_str}
+任务状态：{task_state}
+对话轮次：{turn_count}"""
+
+    return context
 
 
-def _contains_keyword(text: str, keywords: list[str]) -> bool:
-    """检查是否包含关键词"""
-    for kw in keywords:
-        if kw.lower() in text:
-            return True
-    return False
+def _parse_dispatch_result(response_content: str) -> DispatchResult:
+    """解析 LLM 返回的调度结果"""
+    try:
+        content = response_content.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+        data = json.loads(content)
+
+        tool_call_data = data.get("tool_call")
+        if tool_call_data:
+            tool_call = {
+                "name": tool_call_data.get("name", ""),
+                "args": tool_call_data.get("args", {})
+            }
+        else:
+            tool_call = None
+
+        return DispatchResult(
+            need_rag=bool(data.get("need_rag", False)),
+            need_tool=bool(data.get("need_tool", False)),
+            need_clarify=bool(data.get("need_clarify", False)),
+            need_transfer=bool(data.get("need_transfer", False)),
+            clarify_prompt=data.get("clarify_prompt", ""),
+            reason=data.get("reason", ""),
+            tool_call=tool_call,
+        )
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        logger.error(
+            f"Failed to parse dispatch result: {e}, content: {response_content}"
+        )
+        raise ValueError(f"LLM 调度结果解析失败: {e}")
 
 
-def recognize_intent(text: str) -> Intent:
+def llm_dispatch(state: AgentState) -> DispatchResult:
     """
-    识别用户意图（关键词精确匹配）
-
-    优先级：CHAT > TRANSFER > PRODUCT > ORDER > LOGISTICS > USER > UNKNOWN
+    LLM 动态调度决策
 
     Args:
-        text: 用户输入文本
+        state: AgentState
 
     Returns:
-        识别的意图
+        DispatchResult: 调度决策结果
+
+    Raises:
+        ValueError: LLM 调度失败时抛出异常
     """
-    text = _normalize_text(text)
+    messages = state["messages"]
+    if not messages:
+        raise ValueError("LLM 调度失败: messages 为空")
 
-    # 1. 问候闲聊
-    if _contains_keyword(text, INTENT_KEYWORDS[Intent.CHAT]):
-        return Intent.CHAT
+    user_input = messages[-1].content
+    if not user_input or not user_input.strip():
+        raise ValueError("LLM 调度失败: 用户输入为空")
 
-    # 2. 转人工
-    if _contains_keyword(text, INTENT_KEYWORDS[Intent.TRANSFER_HUMAN]):
-        return Intent.TRANSFER_HUMAN
+    context = _build_context(state)
+    prompt = DISPATCHER_PROMPT.format(context=context, user_input=user_input)
 
-    # 3. 产品咨询（先于订单）
-    if _contains_keyword(text, INTENT_KEYWORDS[Intent.PRODUCT_QUERY]):
-        return Intent.PRODUCT_QUERY
+    from src.services.llm import get_llm
 
-    # 4. 售后咨询
-    if _contains_keyword(text, INTENT_KEYWORDS[Intent.AFTER_SALES_QUERY]):
-        return Intent.AFTER_SALES_QUERY
+    llm = get_llm()
 
-    # 5. 售前咨询
-    if _contains_keyword(text, INTENT_KEYWORDS[Intent.PRE_SALES_QUERY]):
-        return Intent.PRE_SALES_QUERY
+    try:
+        response = llm.invoke(
+            [SystemMessage(content=prompt), HumanMessage(content=user_input)]
+        )
+    except Exception as e:
+        logger.error(f"LLM dispatch invoke failed: {e}")
+        raise ValueError(f"LLM 调度失败: {e}")
 
-    # 6. 订单查询
-    if _contains_keyword(text, INTENT_KEYWORDS[Intent.ORDER_QUERY]):
-        return Intent.ORDER_QUERY
+    if not hasattr(response, "content") or not response.content:
+        raise ValueError("LLM 调度失败: 返回内容为空")
 
-    # 5. 物流查询
-    if _contains_keyword(text, INTENT_KEYWORDS[Intent.LOGISTICS_QUERY]):
-        return Intent.LOGISTICS_QUERY
+    dispatch_result = _parse_dispatch_result(response.content)
 
-    # 6. 用户信息
-    if _contains_keyword(text, INTENT_KEYWORDS[Intent.USER_QUERY]):
-        return Intent.USER_QUERY
+    logger.info(
+        f"LLM dispatch: need_rag={dispatch_result['need_rag']}, "
+        f"need_tool={dispatch_result['need_tool']}, "
+        f"need_clarify={dispatch_result['need_clarify']}, "
+        f"need_transfer={dispatch_result['need_transfer']}, "
+        f"reason={dispatch_result['reason']}"
+    )
 
-    return Intent.UNKNOWN
+    return dispatch_result
+
+
+def get_routes_from_dispatch(dispatch_result: DispatchResult) -> List[str]:
+    """从调度结果获取路由列表"""
+    routes = []
+
+    if dispatch_result.get("need_transfer"):
+        return ["transfer"]
+
+    if dispatch_result.get("need_clarify"):
+        return ["clarify"]
+
+    if dispatch_result.get("need_rag"):
+        routes.append("rag")
+
+    if dispatch_result.get("need_tool"):
+        routes.append("agent")
+
+    if not routes:
+        routes.append("chat")
+
+    return routes
+
+
+def get_rag_filter_from_intent(intent: str) -> Optional[dict]:
+    """根据意图获取 RAG filter"""
+    filter_map = {
+        "product": {"type": "product"},
+        "pre_sales": {"type": "pre_sales"},
+        "after_sales": {"type": "after_sales"},
+    }
+    return filter_map.get(intent)
+
+
+PRODUCT_KEYWORDS = [
+    "耀世",
+    "蛟龙",
+    "极光",
+    "无界",
+    "旷世",
+    "翼龙",
+    "深海",
+    "泰坦",
+    "小白",
+]
+
+FAULT_KEYWORDS = {
+    "蓝屏": "蓝屏",
+    "死机": "死机",
+    "黑屏": "黑屏",
+    "无法开机": "无法开机",
+    "充电": "充电问题",
+    "电池": "电池问题",
+    "发热": "发热问题",
+    "风扇": "风扇问题",
+    "花屏": "花屏",
+    "闪退": "闪退",
+    "卡顿": "卡顿",
+    "重装": "重装系统",
+    "驱动": "驱动问题",
+}
 
 
 def extract_order_id(text: str) -> Optional[str]:
@@ -253,30 +254,133 @@ def extract_phone(text: str) -> Optional[str]:
     return None
 
 
-def should_use_tools(text: str) -> bool:
-    """判断是否需要使用工具"""
-    intent = recognize_intent(text)
-    return intent in [Intent.ORDER_QUERY, Intent.LOGISTICS_QUERY, Intent.USER_QUERY]
+def extract_product(text: str) -> Optional[str]:
+    """从文本中提取产品型号"""
+    text = text.lower()
+    for product in PRODUCT_KEYWORDS:
+        if product.lower() in text:
+            return product
+    return None
 
 
-def get_intent_description(text: str) -> str:
-    """获取意图描述"""
-    intent = recognize_intent(text)
-    return intent.value
+def extract_fault_type(text: str) -> Optional[str]:
+    """从文本中提取故障类型"""
+    text = text.lower()
+    for keyword, fault_type in FAULT_KEYWORDS.items():
+        if keyword in text:
+            return fault_type
+    return None
 
 
-def get_rag_filter(intent: Intent) -> Optional[dict]:
-    """根据意图获取 RAG 检索过滤条件
+def extract_all_slots(text: str) -> dict:
+    """一次性提取所有槽位"""
+    slots = {}
+    order_id = extract_order_id(text)
+    phone = extract_phone(text)
+    product = extract_product(text)
+    fault_type = extract_fault_type(text)
+
+    if order_id:
+        slots["order_id"] = order_id
+    if phone:
+        slots["phone"] = phone
+    if product:
+        slots["product"] = product
+    if fault_type:
+        slots["fault_type"] = fault_type
+
+    return slots
+
+
+COREFERENCE_PATTERNS = [
+    "那款",
+    "这款",
+    "它",
+    "刚才那个",
+    "刚才那个订单",
+    "刚才那个产品",
+    "上一个",
+    "上一个订单",
+    "上一个产品",
+]
+
+
+def resolve_coreference(text: str, context_entity: dict) -> str:
+    """
+    指代消解
+    将"那款"、"它"等指代词消解为具体实体
 
     Args:
-        intent: 意图枚举
+        text: 用户输入文本
+        context_entity: 上下文实体字典
 
     Returns:
-        Chroma filter dict or None
+        消解后的文本
     """
-    filter_map = {
-        Intent.PRODUCT_QUERY: {"type": "product"},
-        Intent.PRE_SALES_QUERY: {"type": "pre_sales"},
-        Intent.AFTER_SALES_QUERY: {"type": "after_sales"},
-    }
-    return filter_map.get(intent)
+    if not context_entity:
+        return text
+
+    text_lower = text.lower()
+
+    for pattern in COREFERENCE_PATTERNS:
+        if pattern in text_lower:
+            if "product" in context_entity or "order" in context_entity:
+                result = text
+                if context_entity.get("last_product"):
+                    result = result.replace(pattern, context_entity["last_product"])
+                if context_entity.get("last_order"):
+                    result = result.replace(pattern, context_entity["last_order"])
+                if context_entity.get("last_phone"):
+                    result = result.replace(pattern, context_entity["last_phone"])
+                return result
+
+    return text
+
+
+def update_context_entity(slots: dict, context_entity: dict) -> dict:
+    """
+    更新上下文实体
+    基于当前轮次提取的槽位更新上下文实体
+
+    Args:
+        slots: 当前提取的槽位
+        context_entity: 当前上下文实体
+
+    Returns:
+        更新后的上下文实体
+    """
+    import time
+
+    new_entity = dict(context_entity)
+
+    if slots.get("product"):
+        new_entity["last_product"] = slots["product"]
+        new_entity["last_product_time"] = int(time.time())
+
+    if slots.get("order_id"):
+        new_entity["last_order"] = slots["order_id"]
+        new_entity["last_order_time"] = int(time.time())
+
+    if slots.get("phone"):
+        new_entity["last_phone"] = slots["phone"]
+        new_entity["last_phone_time"] = int(time.time())
+
+    return new_entity
+
+
+INTERRUPT_PATTERNS = [
+    "算了",
+    "先不提了",
+    "换个话题",
+    "暂停",
+    "先这样",
+    "不要了",
+    "不提这个了",
+    "换一个",
+]
+
+
+def is_interrupt(text: str) -> bool:
+    """检测用户是否打断对话"""
+    text_lower = text.lower()
+    return any(pattern in text_lower for pattern in INTERRUPT_PATTERNS)
