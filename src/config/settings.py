@@ -21,7 +21,6 @@ class LLMConfig:
     temperature: float = 0.7
     base_url: str = "http://localhost:11434"
     api_key: str = "ollama"
-    timeout: int = 120
 
 
 @dataclass
@@ -30,7 +29,7 @@ class SiliconFlowConfig:
 
     base_url: str = "https://api.siliconflow.cn/v1"
     api_key: Optional[str] = None
-    model: str = "Qwen/Qwen3.5-4B"
+    model: str = "Qwen/Qwen3.5-9B"
 
 
 @dataclass
@@ -111,15 +110,14 @@ def load_config() -> AppConfig:
         llm=LLMConfig(
             provider=llm_provider,
             model=os.getenv("LLM_MODEL", "qwen3.5:4b"),
-            temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
-            timeout=int(os.getenv("LLM_TIMEOUT", "30")),
+
         ),
         siliconflow=SiliconFlowConfig(
             base_url=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
             api_key=os.getenv("SILICONFLOW_API_KEY"),
-            model=os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen3.5-4B"),
+            model=os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen3.5-9B"),
         ),
         langsmith=LangSmithConfig(
             api_key=os.getenv("LANGCHAIN_API_KEY"),

@@ -6,6 +6,7 @@
 
 from typing import TypedDict, Annotated, Optional, Dict, Any, List
 from langchain_core.messages import BaseMessage
+from pydantic import BaseModel, Field
 
 
 def add_messages(left: list, right: list) -> list:
@@ -32,7 +33,21 @@ def replace_session_status(left: str, right: str) -> str:
     return right
 
 
-class DispatchResult(TypedDict):
+class DispatchResult(BaseModel):
+    """调度决策结果 - Pydantic 版本"""
+
+    need_rag: bool = False
+    need_tool: bool = False
+    need_clarify: bool = False
+    need_transfer: bool = False
+    tool_call: Optional[dict] = None
+    clarify_prompt: str = ""
+    reason: str = ""
+
+
+class DispatchResultDict(TypedDict):
+    """调度决策结果 - Dict 版本（兼容用）"""
+
     need_rag: bool
     need_tool: bool
     need_clarify: bool

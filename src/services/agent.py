@@ -32,7 +32,10 @@ from src.services.intent import (
     is_interrupt,
 )
 from src.services.rag import get_rag
-
+import warnings
+warnings.filterwarnings("ignore")
+import logging
+logging.getLogger("transformers").setLevel(logging.ERROR)
 logger = get_logger(__name__)
 
 # 初始化 LangSmith 追踪（可选，用于调试）
@@ -77,23 +80,6 @@ from src.services.llm import get_llm_with_tools
 
 
 # ==================== 节点函数 ====================
-
-
-def transfer_node(state: AgentState) -> AgentState:
-    """转人工节点 - 已移除，功能在入口处理"""
-    return {"session_status": "transfering"}
-
-
-def chat_node(state: AgentState) -> AgentState:
-    """聊天节点 - 已移除，功能在入口处理"""
-    return {"session_status": "idle"}
-
-
-def clarify_node(state: AgentState) -> AgentState:
-    """追问节点 - 已在外部处理，这里只做状态传递"""
-    return {
-        "session_status": state.get("session_status", "waiting_slot"),
-    }
 
 
 def intent_node(state: AgentState) -> AgentState:
@@ -316,12 +302,12 @@ def run_agent(
     }
 
     dispatch_result = llm_dispatch(raw_state)
-    dispatch_reason = dispatch_result.get("reason", "")
-    need_rag = dispatch_result.get("need_rag", False)
-    need_tool = dispatch_result.get("need_tool", False)
-    need_clarify = dispatch_result.get("need_clarify", False)
-    need_transfer = dispatch_result.get("need_transfer", False)
-    tool_call = dispatch_result.get("tool_call")
+    dispatch_reason = dispatch_result.reason
+    need_rag = dispatch_result.need_rag
+    need_tool = dispatch_result.need_tool
+    need_clarify = dispatch_result.need_clarify
+    need_transfer = dispatch_result.need_transfer
+    tool_call = dispatch_result.tool_call
 
     logger.info(
         f"LLM dispatch: need_rag={need_rag}, need_tool={need_tool}, "
@@ -357,7 +343,7 @@ def run_agent(
     }
 
     if need_clarify:
-        clarify_prompt = dispatch_result.get("clarify_prompt", "请问您具体想咨询什么？")
+        clarify_prompt = dispatch_result.clarify_prompt or "请问您具体想咨询什么？"
         yield clarify_prompt
         memory.add_user_message(user_input)
         memory.set_intent(intent)

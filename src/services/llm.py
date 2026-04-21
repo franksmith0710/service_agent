@@ -5,6 +5,12 @@ LLM 服务模块
 使用单例模式管理实例
 """
 
+"""
+LLM 服务模块
+提供 LLM 初始化和模型切换功能
+使用单例模式管理实例
+"""
+
 from typing import Optional
 from langchain_core.language_models import BaseChatModel
 
@@ -15,10 +21,9 @@ logger = get_logger(__name__)
 
 
 class LLMManager:
-    """LLM 管理器（单例）"""
-
     _instance: Optional["LLMManager"] = None
     _llm: Optional[BaseChatModel] = None
+    _llm_gen: Optional[BaseChatModel] = None  # 生成专用
     _llm_with_tools: Optional[BaseChatModel] = None
 
     def __new__(cls):
@@ -26,76 +31,99 @@ class LLMManager:
             cls._instance = super().__new__(cls)
         return cls._instance
 
+    # ========== 调度专用：极速 JSON ==========
     def get_llm(self) -> BaseChatModel:
-        """获取 LLM 实例"""
         if self._llm is None:
-            self._llm = self._create_llm()
+            self._llm = self._create_llm_dispatch()
         return self._llm
 
+    # ========== 生成回答专用：正常说话 ==========
+    def get_llm_for_generation(self) -> BaseChatModel:
+        if self._llm_gen is None:
+            self._llm_gen = self._create_llm_generation()
+        return self._llm_gen
+
     def get_llm_with_tools(self, tools: list = None) -> BaseChatModel:
-        """获取绑定工具的 LLM 实例"""
         if self._llm_with_tools is None:
             if tools is None:
                 from src.services.tools import get_all_tools
-
                 tools = get_all_tools()
-            self._llm_with_tools = self.get_llm().bind_tools(tools)
+            self._llm_with_tools = self.get_llm_for_generation().bind_tools(tools)
         return self._llm_with_tools
 
     def reset(self):
-        """重置实例（用于测试）"""
         self._llm = None
+        self._llm_gen = None
         self._llm_with_tools = None
         logger.info("LLM manager reset")
 
-    def _create_llm(self) -> BaseChatModel:
-        """创建 LLM 实例"""
+    # ------------------------------
+    # 调度模型：极速、短JSON、不废话
+    # ------------------------------
+    def _create_llm_dispatch(self) -> BaseChatModel:
         provider = config.llm_provider
-
         if provider == "siliconflow":
             from langchain_openai import ChatOpenAI
-
-            api_key = config.siliconflow.api_key
-            if not api_key:
-                raise ValueError("SILICONFLOW_API_KEY is not set")
-
-            llm = ChatOpenAI(
+            return ChatOpenAI(
                 model=config.siliconflow.model,
                 base_url=config.siliconflow.base_url,
-                api_key=api_key,
-                temperature=config.llm.temperature,
-                timeout=config.llm.timeout,
-                max_retries=2,
+                api_key=config.siliconflow.api_key,
+                temperature=0.1,
+                max_tokens=120,
+                timeout=20,
+                max_retries=1,
+                extra_body={
+                    "top_p": 0.3,
+                    "stop": ["\n", "```"]
+                }
             )
-            logger.info(f"Using SiliconFlow model: {config.siliconflow.model}")
-            return llm
         else:
             from langchain_ollama import ChatOllama
-
-            llm = ChatOllama(
+            return ChatOllama(
                 model=config.llm.model,
                 base_url=config.llm.base_url,
-                temperature=config.llm.temperature,
-                num_gpu=1,
-                timeout=config.llm.timeout,
+                temperature=0.1,
+                num_tokens=120,
+                timeout=20,
             )
-            logger.info(f"Using Ollama model: {config.llm.model}")
-            return llm
+
+    # ------------------------------
+    # 生成模型：正常回答、能写长文本、自然
+    # ------------------------------
+    def _create_llm_generation(self) -> BaseChatModel:
+        provider = config.llm_provider
+        if provider == "siliconflow":
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(
+                model=config.siliconflow.model,
+                base_url=config.siliconflow.base_url,
+                api_key=config.siliconflow.api_key,
+                temperature=0.7,
+                max_tokens=1024,
+                timeout=30,
+                max_retries=2,
+            )
+        else:
+            from langchain_ollama import ChatOllama
+            return ChatOllama(
+                model=config.llm.model,
+                base_url=config.llm.base_url,
+                temperature=0.7,
+                num_tokens=1024,
+                timeout=30,
+            )
 
 
 _llm_manager = LLMManager()
 
-
 def get_llm() -> BaseChatModel:
-    """获取 LLM 实例"""
     return _llm_manager.get_llm()
 
+def get_llm_for_generation() -> BaseChatModel:
+    return _llm_manager.get_llm_for_generation()
 
-def get_llm_with_tools():
-    """获取绑定工具的 LLM 实例"""
+def get_llm_with_tools() -> BaseChatModel:
     return _llm_manager.get_llm_with_tools()
 
-
 def reset_llm():
-    """重置 LLM 实例"""
     _llm_manager.reset()
