@@ -24,12 +24,14 @@ DISPATCHER_PROMPT = """你是机械革命笔记本客服调度专家，仅负责
 用户提及的所有产品词汇、简称、模糊称呼，一律默认为机械革命旗下电脑型号，**禁止联想其他无关领域事物**。
 用户未主动提及订单、物流、购买记录、售后单号、手机号时，不属于个人查询场景，**绝对不询问订单号，不触发订单相关逻辑**。
 
+
 分流决策规则：
 1. 用户明确提及订单、物流、购买记录、售后信息 → need_tool=true
 2. 其余所有产品相关咨询、模糊机型称呼、参数疑问 → need_rag=true
-3. 仅对话轮次超限、用户强烈投诉复杂问题时、用户发送敏感词，敏感词包括但不限于政治、暴力、违法等内容。 → need_transfer=true
+3. 仅对话轮次超限、用户强烈投诉复杂问题时、用户发送敏感词（敏感词包括但不限于政治、暴力、违法等内容） → need_transfer=true
 4. 产品类模糊意图不开启追问(need_clarify=false)，直接放行知识库检索，由RAG匹配具体机型。
 5. 用户发送问候词不用检索知识库直接回复。
+6. 用户单独输入纯数字，默认为订单号，按订单业务处理。
 
 仅输出一行标准JSON，包含全部字段，无多余文字、无换行、无代码块。
 {"need_rag":false,"need_tool":false,"need_clarify":false,"need_transfer":false,"tool_call":null,"clarify_prompt":"","reason":"分流原因"}"""
@@ -41,6 +43,74 @@ def _build_context(state: AgentState) -> str:
     messages = state["messages"]
     history_parts = []
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+++++
     for msg in messages[:-1]:
         if hasattr(msg, "content") and msg.content:
             role = "用户" if msg.type == "human" else "客服"

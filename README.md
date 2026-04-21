@@ -43,8 +43,7 @@ kefu_agent/
 │       ├── memory.py           # 对话记忆
 │       ├── rag.py              # RAG 知识库
 │       ├── intent.py           # 槽位提取 + 消解
-│       ├── postgres.py          # PostgreSQL
-│       └── validator.py       # 输入验证
+│       └── postgres.py          # PostgreSQL 
 ├── data/                      # 知识库数据
 ├── scripts/                   # 初始化脚本
 ├── tests/                     # 单元测试

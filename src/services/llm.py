@@ -68,13 +68,12 @@ class LLMManager:
                 model=config.siliconflow.model,
                 base_url=config.siliconflow.base_url,
                 api_key=config.siliconflow.api_key,
-                temperature=0.1,
+                temperature=0.2,
                 max_tokens=120,
                 timeout=20,
                 max_retries=1,
                 extra_body={
                     "top_p": 0.3,
-                    "stop": ["\n", "```"]
                 }
             )
         else:
@@ -82,8 +81,8 @@ class LLMManager:
             return ChatOllama(
                 model=config.llm.model,
                 base_url=config.llm.base_url,
-                temperature=0.1,
-                num_tokens=120,
+                temperature=0.2,
+                num_predict=120,
                 timeout=20,
             )
 
@@ -109,7 +108,7 @@ class LLMManager:
                 model=config.llm.model,
                 base_url=config.llm.base_url,
                 temperature=0.7,
-                num_tokens=1024,
+                num_predict=1024,
                 timeout=30,
             )
 
