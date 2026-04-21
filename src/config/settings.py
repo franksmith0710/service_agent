@@ -40,14 +40,7 @@ class LangSmithConfig:
     project_name: str = "kefu-agent"
 
 
-@dataclass
-class RedisConfig:
-    """Redis 配置"""
 
-    host: str = "localhost"
-    port: int = 6379
-    db: int = 0
-    password: Optional[str] = None
 
 
 @dataclass
@@ -93,7 +86,6 @@ class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     siliconflow: SiliconFlowConfig = field(default_factory=SiliconFlowConfig)
     langsmith: LangSmithConfig = field(default_factory=LangSmithConfig)
-    redis: RedisConfig = field(default_factory=RedisConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     chroma: ChromaConfig = field(default_factory=ChromaConfig)
     postgres: PostgresConfig = field(default_factory=PostgresConfig)
@@ -122,12 +114,6 @@ def load_config() -> AppConfig:
         langsmith=LangSmithConfig(
             api_key=os.getenv("LANGCHAIN_API_KEY"),
             project_name=os.getenv("LANGCHAIN_PROJECT", "kefu-agent"),
-        ),
-        redis=RedisConfig(
-            host=os.getenv("REDIS_HOST", "localhost"),
-            port=int(os.getenv("REDIS_PORT", "6379")),
-            db=int(os.getenv("REDIS_DB", "0")),
-            password=os.getenv("REDIS_PASSWORD") or None,
         ),
         embedding=EmbeddingConfig(
             model=os.getenv("EMBEDDING_MODEL", "bge-m3"),

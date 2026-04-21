@@ -88,19 +88,24 @@ def intent_node(state: AgentState) -> AgentState:
 
 
 def rag_node(state: AgentState) -> AgentState:
-    """RAG 检索节点 - 只同步检索，返回原始文档"""
+    """RAG 检索节点 - 多路召回"""
     messages = state["messages"]
     user_query = messages[-1].content
 
-    logger.info(f"RAG search: {user_query[:30]}...")
+    logger.info(f"RAG multi-search: {user_query[:30]}...")
 
     try:
         rag = get_rag()
-        docs = rag.similarity_search(user_query, k=2)
+        docs = rag.multi_search(user_query, k=2, vector_k=5, bm25_k=5)
         rag_docs = [d.page_content for d in docs]
     except Exception as e:
-        logger.warning(f"RAG search failed: {e}")
-        rag_docs = []
+        logger.warning(f"RAG multi-search failed: {e}, fallback to vector search")
+        try:
+            docs = rag.similarity_search(user_query, k=2)
+            rag_docs = [d.page_content for d in docs]
+        except Exception as e2:
+            logger.warning(f"RAG search also failed: {e2}")
+            rag_docs = []
 
     logger.info(f"RAG docs: {len(rag_docs)}")
 

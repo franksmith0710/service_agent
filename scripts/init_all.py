@@ -12,7 +12,7 @@ def main():
     print("智能客服系统初始化")
     print("=" * 50)
 
-    print("\n[1/3] 初始化知识库...")
+    print("\n[1/2] 初始化知识库...")
     try:
         from src.services.rag import init_from_files
 
@@ -21,7 +21,7 @@ def main():
     except Exception as e:
         print(f"   知识库初始化失败: {e}")
 
-    print("\n[2/3] 测试数据库连接...")
+    print("\n[2/2] 测试数据库连接...")
     try:
         from src.services.postgres import test_connection
 
@@ -31,18 +31,6 @@ def main():
             print("   数据库连接失败")
     except Exception as e:
         print(f"   数据库连接失败: {e}")
-
-    print("\n[3/3] 测试 Redis 连接...")
-    try:
-        from src.services.memory import _get_redis_client
-
-        client = _get_redis_client()
-        if client:
-            print("   Redis 连接成功")
-        else:
-            print("   Redis 连接失败，使用内存存储")
-    except Exception as e:
-        print(f"   Redis 连接失败: {e}")
 
     print("\n" + "=" * 50)
     print("初始化完成！")

@@ -9,10 +9,12 @@ import os
 import re
 import logging
 import hashlib
+import numpy as np
 from typing import Optional, List
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
+from rank_bm25 import BM25Okapi
 
 from src.config.settings import config
 from src.config.logger import get_logger
@@ -149,6 +151,8 @@ class KnowledgeBase:
         self.embeddings = self._create_embeddings()
         self.vector_store: Optional[Chroma] = None
         self._initialized = False
+        self._all_docs: List[Document] = []
+        self._bm25_index = None
 
     def _create_embeddings(self) -> OllamaEmbeddings:
         return OllamaEmbeddings(
@@ -195,6 +199,99 @@ class KnowledgeBase:
     ) -> list[Document]:
         self.initialize()
         return self.vector_store.similarity_search(query=query, k=k, filter=filter)
+
+    def multi_search(
+        self, query: str, k: int = 3, vector_k: int = 5, bm25_k: int = 5
+    ) -> list[Document]:
+        """
+        多路召回检索：向量 + BM25 融合
+
+        Args:
+            query: 查询文本
+            k: 最终返回数量
+            vector_k: 向量召回数量
+            bm25_k: BM25 召回数量
+
+        Returns:
+            合并后的文档列表
+        """
+        self.initialize()
+
+        vector_docs = self.vector_store.similarity_search(query=query, k=vector_k)
+        logger.info(f"Vector recall: {len(vector_docs)} docs")
+
+        bm25_docs = self._bm25_search(query, k=bm25_k)
+        logger.info(f"BM25 recall: {len(bm25_docs)} docs")
+
+        merged = self._merge_and_rerank(query, vector_docs, bm25_docs, k=k)
+        logger.info(f"Multi-retrieval merged: {len(merged)} docs")
+
+        return merged
+
+    def _bm25_search(self, query: str, k: int = 5) -> list[Document]:
+        """BM25 关键词召回"""
+        if not hasattr(self, "_bm25_index") or self._bm25_index is None:
+            self._init_bm25()
+
+        if self._bm25_index is None:
+            return []
+
+        tokenized_query = query.split()
+        scores = self._bm25_index.get_scores(tokenized_query)
+        top_indices = np.argsort(scores)[::-1][:k]
+
+        results = []
+        for idx in top_indices:
+            if scores[idx] > 0 and idx < len(self._all_docs):
+                results.append(self._all_docs[idx])
+
+        return results
+
+    def _init_bm25(self):
+        """初始化 BM25 索引"""
+        if not hasattr(self, "_all_docs") or not self._all_docs:
+            self._load_all_docs()
+
+        if self._all_docs:
+            tokenized_docs = [doc.page_content.split() for doc in self._all_docs]
+            self._bm25_index = BM25Okapi(tokenized_docs)
+            logger.info(f"BM25 index initialized with {len(self._all_docs)} docs")
+        else:
+            self._bm25_index = None
+
+    def _load_all_docs(self):
+        """从向量库加载全部文档用于 BM25"""
+        try:
+            if self.vector_store and self.vector_store._collection.count() > 0:
+                all_data = self.vector_store.get()
+                self._all_docs = []
+                for i, content in enumerate(all_data.get("documents", [])):
+                    doc = Document(
+                        page_content=content,
+                        metadata=all_data.get("metadatas", [{}])[i] if all_data.get("metadatas") else {}
+                    )
+                    self._all_docs.append(doc)
+                logger.info(f"Loaded {len(self._all_docs)} docs for BM25")
+        except Exception as e:
+            logger.warning(f"Failed to load docs for BM25: {e}")
+            self._all_docs = []
+
+    def _merge_and_rerank(
+        self, query: str, vector_docs: list[Document], bm25_docs: list[Document], k: int = 3
+    ) -> list[Document]:
+        """合并多路结果并简单去重"""
+        seen_content = {}
+        merged = []
+
+        for doc in vector_docs + bm25_docs:
+            content = doc.page_content
+            if content not in seen_content:
+                seen_content[content] = True
+                merged.append(doc)
+                if len(merged) >= k:
+                    break
+
+        return merged[:k]
 
 
 def get_rag() -> KnowledgeBase:
