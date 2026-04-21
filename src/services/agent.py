@@ -17,7 +17,6 @@ from langchain_core.messages import (
     HumanMessage,
     AIMessage,
     SystemMessage,
-    ToolMessage,
 )
 
 from src.config.settings import config
@@ -132,7 +131,7 @@ def agent_node(state: AgentState) -> AgentState:
         return {"session_status": "idle"}
 
     last_msg = messages[-1]
-    if isinstance(last_msg, ToolMessage):
+    if isinstance(last_msg, AIMessage):
         return {"session_status": "idle"}
 
     return {"session_status": "idle"}
@@ -184,10 +183,7 @@ def tools_node(state: AgentState) -> AgentState:
 
         return {
             "messages": [
-                ToolMessage(
-                    content=tool_result,
-                    tool_call_id=tool_call_id,
-                )
+                AIMessage(content=tool_result)
             ],
             "tool_results": [{"name": tool_name, "result": tool_result}],
             "slots": new_slots,
@@ -196,10 +192,7 @@ def tools_node(state: AgentState) -> AgentState:
     else:
         return {
             "messages": [
-                ToolMessage(
-                    content=f"未知工具: {tool_name}",
-                    tool_call_id=tool_call_id,
-                )
+                AIMessage(content=f"未知工具: {tool_name}")
             ],
             "tool_results": [{"name": tool_name, "result": f"未知工具: {tool_name}"}],
             "session_status": "idle",
@@ -291,6 +284,13 @@ def run_agent(
     saved_context_entity = memory.get_context_entity()
     prev_session_status = memory.get_session_status()
     prev_turn_count = memory.get_turn_count()
+
+    if prev_turn_count >= MAX_TURNS:
+        yield "对话已达最大轮次(8轮)，为保证服务质量已为您转接人工客服。\n人工客服工作时间: 周一至周五 9:00-18:00\n客服热线: 400-990-5898"
+        memory.clear()
+        memory.set_session_status("transfering")
+        memory.increment_turn()
+        return
 
     if is_interrupt(user_input):
         logger.info(f"User interrupted, saving session state")
@@ -399,7 +399,7 @@ def run_agent(
     final_tool_results = []
     final_session_status = "idle"
     current_intent = initial_state.get("intent")
-    final_slots = {}
+    final_slots = initial_state.get("slots", {})
     final_context_entity = initial_state.get("context_entity", {})
 
     agent_graph = get_agent_graph()
@@ -413,42 +413,23 @@ def run_agent(
             final_tool_results.extend(tool_results)
             tools_slots = event["tools"].get("slots", {})
             if tools_slots:
-                final_slots = tools_slots
+                final_slots = {**final_slots, **tools_slots}
 
-    if not need_rag and not need_tool:
-        chat_greetings = {"你好", "您好", "hi", "hello", "在吗", "在么", "有人吗", "哈喽"}
-        chat_thanks = {"谢谢", "感谢", "谢了", "多谢"}
-        chat_goodbyes = {"再见", "拜拜", "bye", "88", "回头聊"}
-        user_lower = user_input.strip().lower()
-        if any(word in user_lower for word in chat_greetings):
-            final_response_text = "您好！我是智能客服，有什么可以帮您的吗？😊"
-        elif any(word in user_lower for word in chat_thanks):
-            final_response_text = "不客气！很高兴能帮到您~"
-        elif any(word in user_lower for word in chat_goodbyes):
-            final_response_text = "再见！感谢您的咨询，祝您生活愉快！👋"
-        else:
-            final_response_text = "您好！我可以帮您查询产品、售后、订单、物流等问题，请问需要什么帮助？"
-    else:
-        llm_messages = [
-            SystemMessage(content="你是机械革命官方客服，仅使用提供的资料回答，不编造。")
-        ]
+    llm_messages = [
+        SystemMessage(content="你是机械革命官方客服，仅使用提供的资料回答，不编造。")
+    ]
 
-        if history:
-            llm_messages.extend(history)
+    if history:
+        llm_messages.extend(history)
 
-        rag_context = "\n".join(final_rag_docs) if need_rag else ""
-        if rag_context:
-            llm_messages.append(HumanMessage(content=f"参考资料：\n{rag_context}"))
+    rag_context = "\n".join(final_rag_docs) if need_rag else ""
+    if rag_context:
+        llm_messages.append(HumanMessage(content=f"参考资料：\n{rag_context}"))
 
-        for tr in final_tool_results:
-            llm_messages.append(
-                ToolMessage(content=tr.get("result", ""), tool_call_id=tr.get("name", ""))
-            )
+    llm_messages.append(HumanMessage(content=user_input))
 
-        llm_messages.append(HumanMessage(content=user_input))
-
-        final_response = llm_with_tools.invoke(llm_messages)
-        final_response_text = final_response.content
+    final_response = llm_with_tools.invoke(llm_messages)
+    final_response_text = final_response.content
 
     if enable_stream:
         for char in final_response_text:

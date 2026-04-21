@@ -11,7 +11,7 @@
 import json
 import logging
 from typing import Optional
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
 from src.config.settings import config
 from src.config.logger import get_logger
@@ -352,11 +352,6 @@ class ChatMemory:
                 msg = AIMessage(content=content)
                 if msg_dict.get("tool_calls"):
                     msg.tool_calls = msg_dict["tool_calls"]
-                messages.append(msg)
-            elif msg_type == "tool":
-                msg = ToolMessage(
-                    content=content, tool_call_id=msg_dict.get("tool_call_id", "")
-                )
                 messages.append(msg)
             else:
                 messages.append(HumanMessage(content=content))
