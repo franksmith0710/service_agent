@@ -34,27 +34,14 @@ def replace_session_status(left: str, right: str) -> str:
 
 
 class DispatchResult(BaseModel):
-    """调度决策结果 - Pydantic 版本"""
+    """调度决策结果"""
 
     need_rag: bool = False
     need_tool: bool = False
     need_clarify: bool = False
-    need_transfer: bool = False
-    tool_call: Optional[dict] = None
+    tool_name: str = ""
+    tool_params: Dict[str, Any] = {}
     clarify_prompt: str = ""
-    reason: str = ""
-
-
-class DispatchResultDict(TypedDict):
-    """调度决策结果 - Dict 版本（兼容用）"""
-
-    need_rag: bool
-    need_tool: bool
-    need_clarify: bool
-    need_transfer: bool
-    clarify_prompt: Optional[str]
-    reason: str
-    tool_call: Optional[Dict[str, Any]]
 
 
 class AgentState(TypedDict):
@@ -71,3 +58,6 @@ class AgentState(TypedDict):
 
     rag_docs: Annotated[List[str], merge_rag_docs]
     tool_results: Annotated[List[Dict[str, Any]], merge_tool_results]
+
+    tool_name: str
+    tool_params: Annotated[Dict[str, Any], merge_slots]

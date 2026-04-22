@@ -19,7 +19,6 @@ from src.services.postgres import (
     search_orders,
 )
 
-from src.services.intent import extract_order_id, extract_phone
 from src.config.logger import get_logger
 
 logger = get_logger(__name__)

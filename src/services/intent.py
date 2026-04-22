@@ -5,7 +5,6 @@
 支持：RAG / Tool / 混合 / 追问 / 转人工
 """
 
-import json
 import re
 import logging
 from typing import Optional, List, Any
@@ -17,50 +16,32 @@ from src.models.types import AgentState, DispatchResult
 
 logger = get_logger(__name__)
 
-DISPATCHER_PROMPT = """你是机械革命笔记本客服调度专家，仅负责业务分流决策，严格输出指定JSON，不要多余文字。
+DISPATCHER_PROMPT = """你是机械革命笔记本客服调度专家，仅做业务分流决策。
 
 全局硬性约束：
 本对话仅限机械革命笔记本电脑业务。
-用户提及的所有产品词汇、简称、模糊称呼，一律默认为机械革命旗下电脑型号，**禁止联想其他无关领域事物**。
-用户未主动提及订单、物流、购买记录、售后单号、手机号时，不属于个人查询场景，**绝对不询问订单号，不触发订单相关逻辑**。
-
-
+用户提及的所有产品词汇、简称、模糊称呼，一律默认为机械革命旗下电脑型号，禁止联想其他无关领域事物。
 分流决策规则：
-1. 用户明确提及订单、物流、购买记录、售后信息 → need_tool=true
-2. 其余所有产品相关咨询、模糊机型称呼、参数疑问 → need_rag=true
-3. 仅对话轮次超限、用户强烈投诉复杂问题时、用户发送敏感词（敏感词包括但不限于政治、暴力、违法等内容） → need_transfer=true
-4. 产品类模糊意图不开启追问(need_clarify=false)，直接放行知识库检索，由RAG匹配具体机型。
-5. 用户发送问候词不用检索知识库直接回复。
-6. 用户单独输入纯数字，默认为订单号，按订单业务处理。
+1. 用户明确提及订单、物流、购买记录、售后信息 → need_tool=true，tool_name="query_order"或"query_logistics"
+2. 用户明确要求转人工 → need_tool=true，tool_name="transfer_to_human"
+3. 其余所有产品相关咨询、模糊机型称呼、参数疑问 → need_rag=true
+4. 用户询问产品但信息不全 → need_clarify=true，并给出clarify_prompt
+5. 用户问候无需检索，直接兜底回复
+6. 用户输入纯数字默认为订单号，触发tool_name="query_order"
 
-仅输出一行标准JSON，包含全部字段，无多余文字、无换行、无代码块。
-{"need_rag":false,"need_tool":false,"need_clarify":false,"need_transfer":false,"tool_call":null,"clarify_prompt":"","reason":"分流原因"}"""
+参数提取规则：
+- query_order参数：order_id 或 phone，从用户输入中提取
+- query_logistics参数：order_id 或 phone
+- transfer_to_human参数：reason（转接原因）
 
+要求：
+1. 输出标准合法JSON，tool_params字段统一为{}，禁止使用null
+2. 只输出一行纯JSON，无多余文字、无换行、无解释
+3. 必须完整输出，绝对不允许空输出
 
-
-def _build_context(state: AgentState) -> str:
-    """构建上下文信息"""
-    messages = state["messages"]
-    history_parts = []
-    for msg in messages[:-1]:
-        if hasattr(msg, "content") and msg.content:
-            role = "用户" if msg.type == "human" else "客服"
-            history_parts.append(f"{role}: {msg.content}")
-
-    history = "\n".join(history_parts[-6:]) if history_parts else "无历史对话"
-
-    slots = state.get("slots", {})
-    task_state = state.get("task_state", "pending")
-    turn_count = state.get("turn_count", 0)
-
-    slots_str = json.dumps(slots, ensure_ascii=False) if slots else "无"
-
-    context = f"""历史对话：{history}
-已提取槽位：{slots_str}
-任务状态：{task_state}
-对话轮次：{turn_count}"""
-
-    return context
+输出模板（严格照搬）：
+{"need_rag":false,"need_tool":false,"need_clarify":false,"tool_name":"","tool_params":{},"clarify_prompt":""}
+"""
 
 
 def _parse_dispatch_result(response_content: str) -> DispatchResult:
@@ -86,15 +67,13 @@ def _parse_dispatch_result(response_content: str) -> DispatchResult:
 
     except Exception as e:
         logger.warning(f"解析失败，使用兜底: {str(e)}")
-        # 永远不崩溃
         return DispatchResult(
             need_rag=False,
             need_tool=False,
             need_clarify=False,
-            need_transfer=False,
-            tool_call=None,
+            tool_name="",
+            tool_params={},
             clarify_prompt="",
-            reason="解析失败兜底"
         )
 
 
@@ -102,29 +81,31 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
     try:
         messages = state["messages"]
         if not messages:
-            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, need_transfer=False, tool_call=None, clarify_prompt="", reason="无消息")
+            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, tool_name="", tool_params={}, clarify_prompt="")
 
         user_input = messages[-1].content
         if not user_input or not user_input.strip():
-            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, need_transfer=False, tool_call=None, clarify_prompt="", reason="无输入")
+            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, tool_name="", tool_params={}, clarify_prompt="")
+
+        history = messages[:-1]
 
         prompt = DISPATCHER_PROMPT
 
         from src.services.llm import get_llm
         llm = get_llm()
 
+        msgs = [SystemMessage(content=prompt)]
+        msgs.extend(history)
+        msgs.append(HumanMessage(content=user_input))
 
-        response = llm.invoke([
-            SystemMessage(content=prompt),
-            HumanMessage(content=user_input)
-        ])
+        response = llm.invoke(msgs)
 
         if not hasattr(response, "content") or not response.content or response.content.strip() == "":
             logger.warning("模型返回空，使用兜底决策")
             return DispatchResult(
                 need_rag=False, need_tool=False,
-                need_clarify=False, need_transfer=False,
-                tool_call=None, clarify_prompt="", reason="空返回兜底"
+                need_clarify=False, tool_name="",
+                tool_params={}, clarify_prompt="",
             )
 
         return _parse_dispatch_result(response.content)
@@ -133,9 +114,10 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
         logger.error(f"调度异常: {e}")
         return DispatchResult(
             need_rag=False, need_tool=False,
-            need_clarify=False, need_transfer=False,
-            tool_call=None, clarify_prompt="", reason="异常兜底"
+            need_clarify=False, tool_name="",
+            tool_params={}, clarify_prompt="",
         )
+
 
 def get_routes_from_dispatch(dispatch_result: DispatchResult) -> List[str]:
     """从调度结果获取路由列表"""

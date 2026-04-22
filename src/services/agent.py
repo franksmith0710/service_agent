@@ -116,58 +116,56 @@ MAX_TURNS = 8
 
 
 def agent_node(state: AgentState) -> AgentState:
-    """Agent 节点 - ReAct 循环继续"""
+    """Agent 节点 - ReAct 循环继续 - 透传数据"""
     messages = state.get("messages", [])
+    tool_results = state.get("tool_results", [])
+    slots = state.get("slots", {})
+    rag_docs = state.get("rag_docs", [])
+
     if not messages:
         return {"session_status": "idle"}
 
     last_msg = messages[-1]
-    if isinstance(last_msg, AIMessage):
-        return {"session_status": "idle"}
+    if isinstance(last_msg, AIMessage) and hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+        return {"session_status": "idle"}  # 继续执行工具
 
-    return {"session_status": "idle"}
+    # 透传已有数据，不丢弃
+    return {
+        "session_status": "idle",
+        "tool_results": tool_results,
+        "slots": slots,
+        "rag_docs": rag_docs,
+    }
 
 
 def tools_node(state: AgentState) -> AgentState:
     """
     工具执行节点
-    更新槽位、任务状态、last_tool
+    从state中读取tool_name和tool_params执行
     """
-    messages = state["messages"]
-    last_msg = messages[-1]
-    session_id = state.get("session_id", "")
+    tool_name = state.get("tool_name", "")
+    tool_params = state.get("tool_params", {})
 
-    tool_calls = getattr(last_msg, "tool_calls", None)
-    if not tool_calls:
+    if not tool_name:
         return {
             "messages": [AIMessage(content="无工具调用")],
             "session_status": "idle",
+            "tool_results": [],
+            "slots": {},
         }
 
-    tool_call = tool_calls[0]
-    tool_name = tool_call["name"]
-    tool_args_raw = tool_call.get("args", {})
-    tool_call_id = tool_call.get("id", "")
-
-    if isinstance(tool_args_raw, str):
-        tool_args = json.loads(tool_args_raw) if tool_args_raw else {}
-    elif isinstance(tool_args_raw, dict):
-        tool_args = tool_args_raw
-    else:
-        tool_args = {}
-
-    logger.info(f"Tool call: {tool_name}, args: {tool_args}")
+    logger.info(f"Tool call: {tool_name}, params: {tool_params}")
 
     new_slots = {}
-    if "order_id" in tool_args:
-        new_slots["order_id"] = tool_args["order_id"]
-    if "phone" in tool_args:
-        new_slots["phone"] = tool_args["phone"]
+    if "order_id" in tool_params:
+        new_slots["order_id"] = tool_params["order_id"]
+    if "phone" in tool_params:
+        new_slots["phone"] = tool_params["phone"]
 
     tool_func = TOOL_MAP.get(tool_name)
     if tool_func:
         try:
-            tool_result = tool_func.invoke(tool_args)
+            tool_result = tool_func.invoke(tool_params)
         except Exception as e:
             logger.error(f"Tool call failed: {e}")
             tool_result = TOOL_ERROR_STRATEGY.get(tool_name, "服务暂时不可用")
@@ -187,6 +185,7 @@ def tools_node(state: AgentState) -> AgentState:
             ],
             "tool_results": [{"name": tool_name, "result": f"未知工具: {tool_name}"}],
             "session_status": "idle",
+            "slots": {},
         }
 
 
@@ -199,49 +198,31 @@ def create_agent_graph():
 
     graph = StateGraph(AgentState)
 
-    graph.add_node("intent", intent_node)
     graph.add_node("rag", rag_node)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tools_node)
 
-    graph.set_entry_point("intent")
+    graph.set_entry_point("agent")
 
-    def simple_router(state: AgentState) -> str:
-        """根据 intent 决定路由"""
-        intent = state.get("intent", "chat")
-        if intent == "product":
-            return "rag"
-        return "agent"
-
-    graph.add_conditional_edges(
-        "intent",
-        simple_router,
-        {
-            "rag": "rag",
-            "agent": "agent",
-        },
-    )
-
-    graph.add_edge("rag", END)
-
-    def should_call_tool(state: AgentState) -> str:
-        messages = state.get("messages", [])
-        if not messages:
-            return "end"
-        last_msg = messages[-1]
-        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+    def need_route(state: AgentState) -> str:
+        tool_name = state.get("tool_name", "")
+        if tool_name:
             return "tools"
+        if state.get("need_rag"):
+            return "rag"
         return "end"
 
     graph.add_conditional_edges(
         "agent",
-        should_call_tool,
+        need_route,
         {
             "tools": "tools",
+            "rag": "rag",
             "end": END,
         },
     )
 
+    graph.add_edge("rag", END)
     graph.add_edge("tools", "agent")
 
     return graph.compile()
@@ -307,33 +288,29 @@ def run_agent(
     }
 
     dispatch_result = llm_dispatch(raw_state)
-    dispatch_reason = dispatch_result.reason
     need_rag = dispatch_result.need_rag
     need_tool = dispatch_result.need_tool
     need_clarify = dispatch_result.need_clarify
-    need_transfer = dispatch_result.need_transfer
-    tool_call = dispatch_result.tool_call
+    tool_name = dispatch_result.tool_name
+    tool_params = dispatch_result.tool_params
 
     logger.info(
         f"LLM dispatch: need_rag={need_rag}, need_tool={need_tool}, "
-        f"tool_call={tool_call}, reason={dispatch_reason}"
+        f"tool_name={tool_name}, tool_params={tool_params}"
     )
 
     intent = "product" if need_rag else "order"
+    session_status = "waiting" if need_clarify else "idle"
 
     slots = extract_all_slots(user_input)
-    if tool_call and tool_call.get("args"):
-        slots = {**slots, **tool_call.get("args", {})}
+    if tool_params:
+        slots = {**slots, **tool_params}
     merged_slots = {**saved_slots, **slots}
     new_context_entity = update_context_entity(merged_slots, saved_context_entity)
 
     turn_count = prev_turn_count + 1
 
     messages = [HumanMessage(content=user_input)]
-    if need_tool and tool_call:
-        messages.append(
-            AIMessage(content="", tool_calls=[tool_call])
-        )
 
     initial_state = {
         "messages": messages,
@@ -343,26 +320,23 @@ def run_agent(
         "tool_results": [],
         "slots": merged_slots,
         "context_entity": new_context_entity,
-        "session_status": "waiting_slot" if need_clarify else "idle",
+        "session_status": session_status,
         "turn_count": turn_count,
+        "tool_name": tool_name,
+        "tool_params": tool_params,
     }
 
     if need_clarify:
         clarify_prompt = dispatch_result.clarify_prompt or "请问您具体想咨询什么？"
         yield clarify_prompt
         memory.add_user_message(user_input)
+        memory.add_ai_message(clarify_prompt)
         memory.set_intent(intent)
         memory.add_slots(merged_slots)
         memory.add_context_entity(new_context_entity)
-        memory.set_session_status("waiting_slot")
+        memory.set_session_status("waiting")
         memory.increment_turn()
         return
-
-    if need_transfer:
-        yield "已为您转接人工客服，请稍候...\n人工客服工作时间: 周一至周五 9:00-18:00\n客服热线: 400-990-5898"
-        memory.add_user_message(user_input)
-        memory.set_intent("transfer")
-        memory.set_session_status("transfering")
         memory.increment_turn()
         return
 
@@ -372,15 +346,16 @@ def run_agent(
         chat_goodbyes = {"再见", "拜拜", "bye", "88", "回头聊"}
         user_lower = user_input.strip().lower()
         if any(word in user_lower for word in chat_greetings):
-            yield "您好！我是智能客服，有什么可以帮您的吗？😊"
+            chat_response = "您好！我是智能客服，有什么可以帮您的吗？😊"
         elif any(word in user_lower for word in chat_thanks):
-            yield "不客气！很高兴能帮到您~"
+            chat_response = "不客气！很高兴能帮到您~"
         elif any(word in user_lower for word in chat_goodbyes):
-            yield "再见！感谢您的咨询，祝您生活愉快！👋"
+            chat_response = "再见！感谢您的咨询，祝您生活愉快！👋"
         else:
-            yield "您好！我可以帮您查询产品、售后、订单、物流等问题，请问需要什么帮助？"
+            chat_response = "您好！我可以帮您查询产品、售后、订单、物流等问题，请问需要什么帮助？"
+        yield chat_response
         memory.add_user_message(user_input)
-        memory.add_ai_message("")
+        memory.add_ai_message(chat_response)
         memory.set_intent("chat")
         memory.increment_turn()
         return
@@ -393,18 +368,31 @@ def run_agent(
     final_slots = initial_state.get("slots", {})
     final_context_entity = initial_state.get("context_entity", {})
 
-    agent_graph = get_agent_graph()
-    for event in agent_graph.stream(initial_state):
-        if "intent" in event:
-            final_session_status = event["intent"].get("session_status", "idle")
-        if "rag" in event:
-            final_rag_docs = event["rag"].get("rag_docs", [])
-        if "tools" in event:
-            tool_results = event["tools"].get("tool_results", [])
-            final_tool_results.extend(tool_results)
-            tools_slots = event["tools"].get("slots", {})
-            if tools_slots:
-                final_slots = {**final_slots, **tools_slots}
+    if need_rag:
+        try:
+            rag = get_rag()
+            docs = rag.multi_search(user_input, k=2, vector_k=5, bm25_k=5)
+            final_rag_docs = [d.page_content for d in docs]
+        except Exception as e:
+            logger.warning(f"RAG search failed: {e}")
+            try:
+                docs = rag.similarity_search(user_input, k=2)
+                final_rag_docs = [d.page_content for d in docs]
+            except Exception as e2:
+                final_rag_docs = []
+
+    if need_tool and tool_name:
+        try:
+            tools_result = tools_node(initial_state)
+            if "tool_results" in tools_result:
+                final_tool_results = tools_result["tool_results"]
+            if "slots" in tools_result and tools_result["slots"]:
+                final_slots = {**final_slots, **tools_result["slots"]}
+        except Exception as e:
+            logger.error(f"Tool execution failed: {e}")
+            final_tool_results = [{"name": tool_name, "result": "服务暂时不可用"}]
+
+    final_session_status = "idle"
 
     llm_messages = [
         SystemMessage(content="你是机械革命官方客服，仅使用提供的资料回答，不编造。")
@@ -417,16 +405,24 @@ def run_agent(
     if rag_context:
         llm_messages.append(HumanMessage(content=f"参考资料：\n{rag_context}"))
 
+    if final_tool_results:
+        tool_context = "\n".join([
+            f"工具结果 - {t['name']}: {t['result']}"
+            for t in final_tool_results
+        ])
+        llm_messages.append(HumanMessage(content=f"工具查询结果：\n{tool_context}"))
+
     llm_messages.append(HumanMessage(content=user_input))
 
-    final_response = llm_with_tools.invoke(llm_messages)
-    final_response_text = final_response.content
+    final_text = ""
+    for msg in llm_with_tools.stream(llm_messages):
+        if msg.content:
+            if enable_stream:
+                for char in msg.content:
+                    yield char
+            final_text += msg.content
 
-    if enable_stream:
-        for char in final_response_text:
-            yield char
-    else:
-        yield final_response_text
+    final_response_text = final_text
 
     memory.add_user_message(user_input)
     memory.add_ai_message(final_response_text)

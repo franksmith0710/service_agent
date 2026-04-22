@@ -110,7 +110,7 @@ class ChatMemory:
 
     def set_session_status(self, status: str) -> None:
         """保存会话状态"""
-        valid_statuses = ["idle", "waiting_slot", "tool_running", "transfering"]
+        valid_statuses = ["idle", "waiting"]
         if status not in valid_statuses:
             logger.warning(f"Invalid session_status: {status}, default to idle")
             status = "idle"
