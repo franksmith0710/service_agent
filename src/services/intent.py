@@ -16,31 +16,19 @@ from src.models.types import AgentState, DispatchResult
 
 logger = get_logger(__name__)
 
-DISPATCHER_PROMPT = """你是机械革命笔记本客服调度专家，仅做业务分流决策。
+SIMPLIFIED_PROMPT = """你是机械革命笔记本客服调度专家，仅做业务分流决策。
 
-全局硬性约束：
-本对话仅限机械革命笔记本电脑业务。
-用户提及的所有产品词汇、简称、模糊称呼，一律默认为机械革命旗下电脑型号，禁止联想其他无关领域事物。
 分流决策规则：
-1. 用户明确提及订单、物流、购买记录、售后信息 → need_tool=true，tool_name="query_order"或"query_logistics"
-2. 用户明确要求转人工 → need_tool=true，tool_name="transfer_to_human"
-3. 其余所有产品相关咨询、模糊机型称呼、参数疑问 → need_rag=true
-4. 用户询问产品但信息不全 → need_clarify=true，并给出clarify_prompt
-5. 用户问候无需检索，直接兜底回复
-6. 用户输入纯数字默认为订单号，触发tool_name="query_order"
-
-参数提取规则：
-- query_order参数：order_id 或 phone，从用户输入中提取
-- query_logistics参数：order_id 或 phone
-- transfer_to_human参数：reason（转接原因）
+1. 产品相关咨询、模糊机型称呼、参数疑问 → need_rag=true
+2. 用户问候、闲聊 → need_rag=false, need_tool=false
+3. 无法判断时 → need_rag=true
 
 要求：
-1. 输出标准合法JSON，tool_params字段统一为{}，禁止使用null
-2. 只输出一行纯JSON，无多余文字、无换行、无解释
-3. 必须完整输出，绝对不允许空输出
+1. 输出标准合法JSON
+2. 只输出一行纯JSON，无多余文字
 
-输出模板（严格照搬）：
-{"need_rag":false,"need_tool":false,"need_clarify":false,"tool_name":"","tool_params":{},"clarify_prompt":""}
+输出模板：
+{"need_rag":false,"need_tool":false,"need_clarify":false,"tool_calls":[],"clarify_prompt":""}
 """
 
 
@@ -71,30 +59,28 @@ def _parse_dispatch_result(response_content: str) -> DispatchResult:
             need_rag=False,
             need_tool=False,
             need_clarify=False,
-            tool_name="",
-            tool_params={},
+            tool_calls=[],
             clarify_prompt="",
         )
 
 
-def llm_dispatch(state: AgentState) -> DispatchResult:
+def llm_dispatch_by_mini_model(state: AgentState) -> DispatchResult:
+    """小模型兜底：仅处理规则无法覆盖的模糊语句"""
     try:
         messages = state["messages"]
         if not messages:
-            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, tool_name="", tool_params={}, clarify_prompt="")
+            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, tool_calls=[], clarify_prompt="")
 
         user_input = messages[-1].content
         if not user_input or not user_input.strip():
-            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, tool_name="", tool_params={}, clarify_prompt="")
+            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, tool_calls=[], clarify_prompt="")
 
         history = messages[:-1]
-
-        prompt = DISPATCHER_PROMPT
 
         from src.services.llm import get_llm
         llm = get_llm()
 
-        msgs = [SystemMessage(content=prompt)]
+        msgs = [SystemMessage(content=SIMPLIFIED_PROMPT)]
         msgs.extend(history)
         msgs.append(HumanMessage(content=user_input))
 
@@ -102,29 +88,125 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
 
         if not hasattr(response, "content") or not response.content or response.content.strip() == "":
             logger.warning("模型返回空，使用兜底决策")
-            return DispatchResult(
-                need_rag=False, need_tool=False,
-                need_clarify=False, tool_name="",
-                tool_params={}, clarify_prompt="",
-            )
+            return DispatchResult(need_rag=True, need_tool=False, need_clarify=False, tool_calls=[], clarify_prompt="")
 
         return _parse_dispatch_result(response.content)
 
     except Exception as e:
-        logger.error(f"调度异常: {e}")
+        logger.error(f"小模型调度异常: {e}")
+        return DispatchResult(need_rag=True, need_tool=False, need_clarify=False, tool_calls=[], clarify_prompt="")
+
+
+def llm_dispatch(state: AgentState) -> DispatchResult:
+    """
+    企业级调度：规则优先 + 小模型兜底
+    规则 100% 覆盖明确场景，不占用模型
+    """
+    try:
+        messages = state["messages"]
+        if not messages:
+            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, tool_calls=[], clarify_prompt="")
+
+        user_input = messages[-1].content
+        if not user_input or not user_input.strip():
+            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, tool_calls=[], clarify_prompt="")
+
+        # 提取槽位（规则匹配）
+        slots = extract_all_slots(user_input)
+        user_input_lower = user_input.lower()
+
+        # ====== 规则 1：明确有订单号或手机号 → 自动识别工具 ======
+        order_id = extract_order_id(user_input)
+        phone = extract_phone(user_input)
+
+        if order_id or phone:
+            tool_args = {}
+            if order_id:
+                tool_args["order_id"] = order_id
+            if phone:
+                tool_args["phone"] = phone
+
+            # 企业规则：自动识别并添加多个工具
+            tool_list = []
+
+            # 有订单号 → 查订单 + 物流
+            if order_id:
+                tool_list.append({"name": "query_order", "args": tool_args})
+                tool_list.append({"name": "query_logistics", "args": tool_args})
+
+            # 有手机号 → 查用户信息
+            if phone:
+                tool_list.append({"name": "query_user_info", "args": tool_args})
+
+            return DispatchResult(
+                need_rag=False,
+                need_tool=True,
+                need_clarify=False,
+                tool_calls=tool_list,  # 多工具自动进队列
+                clarify_prompt=""
+            )
+
+        # ====== 规则 2：提到订单/物流但缺少信息 → 追问 ======
+        if any(k in user_input_lower for k in ["订单", "物流", "查单", "快递"]):
+            return DispatchResult(
+                need_clarify=True,
+                clarify_prompt="请提供您的订单号或手机号，以便为您查询",
+                need_rag=False,
+                need_tool=False,
+                tool_calls=[]
+            )
+
+        # ====== 规则 3：提到产品相关 → RAG 检索 ======
+        product_keywords = ["产品", "配置", "参数", "性能", "价格", "多少钱", "怎么样", "好不好"]
+        if any(k in user_input_lower for k in product_keywords + [p.lower() for p in PRODUCT_KEYWORDS]):
+            return DispatchResult(
+                need_rag=True,
+                need_tool=False,
+                need_clarify=False,
+                tool_calls=[],
+                clarify_prompt=""
+            )
+
+        # ====== 规则 4：明确转人工 ======
+        if any(k in user_input_lower for k in ["人工", "转人工", "投诉", "找人"]):
+            return DispatchResult(
+                need_tool=True,
+                tool_calls=[{"name": "transfer_to_human", "args": {"reason": "用户主动要求转人工"}}],
+                need_rag=False,
+                need_clarify=False,
+                clarify_prompt=""
+            )
+
+        # ====== 规则 5：简单问候 → 直接聊天 ======
+        greetings = ["你好", "您好", "hi", "hello", "嗨"]
+        thanks = ["谢谢", "感谢", "thx", "thanks"]
+        if any(k in user_input_lower for k in greetings + thanks):
+            return DispatchResult(
+                need_rag=False,
+                need_tool=False,
+                need_clarify=False,
+                tool_calls=[],
+                clarify_prompt=""
+            )
+
+        # ====== 兜底：小模型处理模糊语句 ======
+        logger.info("规则无法覆盖，调用小模型兜底")
+        return llm_dispatch_by_mini_model(state)
+
+    except Exception as e:
+        logger.error(f"规则调度异常: {e}")
         return DispatchResult(
-            need_rag=False, need_tool=False,
-            need_clarify=False, tool_name="",
-            tool_params={}, clarify_prompt="",
+            need_rag=True,
+            need_tool=False,
+            need_clarify=False,
+            tool_calls=[],
+            clarify_prompt=""
         )
 
 
 def get_routes_from_dispatch(dispatch_result: DispatchResult) -> List[str]:
     """从调度结果获取路由列表"""
     routes = []
-
-    if dispatch_result.need_transfer:
-        return ["transfer"]
 
     if dispatch_result.need_clarify:
         return ["clarify"]

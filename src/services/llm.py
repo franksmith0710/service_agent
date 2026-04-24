@@ -23,8 +23,7 @@ logger = get_logger(__name__)
 class LLMManager:
     _instance: Optional["LLMManager"] = None
     _llm: Optional[BaseChatModel] = None
-    _llm_gen: Optional[BaseChatModel] = None  # 生成专用
-    _llm_with_tools: Optional[BaseChatModel] = None
+    _llm_gen: Optional[BaseChatModel] = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -44,44 +43,27 @@ class LLMManager:
         return self._llm_gen
 
     def get_llm_with_tools(self, tools: list = None) -> BaseChatModel:
-        if self._llm_with_tools is None:
-            if tools is None:
-                from src.services.tools import get_all_tools
-                tools = get_all_tools()
-            self._llm_with_tools = self.get_llm_for_generation().bind_tools(tools)
-        return self._llm_with_tools
+        if tools is None:
+            from src.services.tools import get_all_tools
+            tools = get_all_tools()
+        return self.get_llm_for_generation().bind_tools(tools)
 
     def reset(self):
         self._llm = None
         self._llm_gen = None
-        self._llm_with_tools = None
         logger.info("LLM manager reset")
 
     # ------------------------------
     # 调度模型：极速、短JSON、不废话
     # ------------------------------
     def _create_llm_dispatch(self) -> BaseChatModel:
-        provider = config.llm_provider
-        if provider == "siliconflow":
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=config.siliconflow.model,
-                base_url=config.siliconflow.base_url,
-                api_key=config.siliconflow.api_key,
-                temperature=0.1,
-                max_tokens=384,
-                request_timeout =20,
-                max_retries=1,
-                top_p = 0.1,
-            )
-        else:
-            from langchain_ollama import ChatOllama
-            return ChatOllama(
-                model=config.llm.model,
-                base_url=config.llm.base_url,
-                temperature=0.2,
-                num_predict=128,
-            )
+        from langchain_ollama import ChatOllama
+        return ChatOllama(
+            model="deepseek-r1:1.5b",
+            base_url=config.llm.base_url,
+            temperature=0.2,
+            num_predict=256,
+        )
 
     # ------------------------------
     # 生成模型：正常回答、能写长文本、自然

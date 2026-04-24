@@ -81,12 +81,18 @@ from src.services.llm import get_llm_with_tools
 
 # ==================== 节点函数 ====================
 
+def safe_node(func):
+    """全链路异常兜底装饰器"""
+    def wrapper(state):
+        try:
+            return func(state)
+        except Exception as e:
+            logger.error(f"节点执行异常: {func.__name__}, {e}")
+            return {}
+    return wrapper
 
-def intent_node(state: AgentState) -> AgentState:
-    """简化后的意图节点 - 只做状态传递"""
-    return {"session_status": state.get("session_status", "idle")}
 
-
+@safe_node
 def rag_node(state: AgentState) -> AgentState:
     """RAG 检索节点 - 多路召回"""
     messages = state["messages"]
@@ -96,7 +102,7 @@ def rag_node(state: AgentState) -> AgentState:
 
     try:
         rag = get_rag()
-        docs = rag.multi_search(user_query, k=2, vector_k=5, bm25_k=5)
+        docs = rag.multi_search(user_query, k=2, vector_k=3, bm25_k=3)
         rag_docs = [d.page_content for d in docs]
     except Exception as e:
         logger.warning(f"RAG multi-search failed: {e}, fallback to vector search")
@@ -108,85 +114,162 @@ def rag_node(state: AgentState) -> AgentState:
             rag_docs = []
 
     logger.info(f"RAG docs: {len(rag_docs)}")
+    return {"rag_docs": rag_docs}
 
-    return {"rag_docs": rag_docs, "session_status": "idle"}
+
+@safe_node
+def check_slots_node(state: AgentState) -> AgentState:
+    """
+    企业级槽位校验
+    订单/物流必须有 order_id 或 phone，没有 → 强制追问
+    """
+    intent = state.get("intent", "")
+    slots = state.get("slots", {})
+
+    if intent in ["order", "logistics"]:
+        if not slots.get("order_id") and not slots.get("phone"):
+            return {
+                "need_clarify": True,
+                "clarify_prompt": "请提供您的订单号或手机号，以便为您查询",
+                "step": "clarify",
+                "next_step": "end"
+            }
+
+    return {
+        "need_clarify": False,
+        "step": "tools",
+        "next_step": "tools"
+    }
+
+
+@safe_node
+def clarify_node(state: AgentState) -> AgentState:
+    """
+    追问回复节点（仅输出提示，不执行工具）
+    从 state 中读取 clarify_prompt 并存入返回 state
+    """
+    clarify_prompt = state.get("clarify_prompt", "请问您具体想咨询什么？")
+    return {
+        "clarify_prompt": clarify_prompt,
+        "step": "end",
+        "next_step": "end"
+    }
+
+
+@safe_node
+def summary_node(state: AgentState) -> AgentState:
+    tool_results = state.get("tool_results", [])
+    rag_docs = state.get("rag_docs", [])
+
+    # 脱敏函数
+    def mask_sensitive(text):
+        import re
+        text = str(text)
+        text = re.sub(r"1[3-9]\d{9}", "1**********", text)
+        text = re.sub(r"\d{10,}", "**********", text)
+        return text
+
+    # 1. 先脱敏
+    masked_tools = [
+        {"name": t["name"], "result": mask_sensitive(t["result"])}
+        for t in tool_results
+    ]
+
+    # 2. 同名工具**只保留最后一条**，彻底去重
+    unique_tools = {}
+    for item in masked_tools:
+        unique_tools[item["name"]] = item
+    masked_tools = list(unique_tools.values())
+
+    # 3. RAG 依旧封顶截断
+    rag_final = rag_docs[:2]
+
+    # 直接返回全新结果，覆盖旧 state，不再拼接冗余
+    return {
+        "tool_results": masked_tools,
+        "rag_docs": rag_final,
+        "step": "end",
+        "next_step": "end"
+    }
 
 
 MAX_TURNS = 8
 
 
-def agent_node(state: AgentState) -> AgentState:
-    """Agent 节点 - ReAct 循环继续 - 透传数据"""
-    messages = state.get("messages", [])
-    tool_results = state.get("tool_results", [])
-    slots = state.get("slots", {})
-    rag_docs = state.get("rag_docs", [])
+@safe_node
+def tools_node(state: AgentState) -> AgentState:
+    """
+    企业ReAct工具节点：单次执行一个工具
+    配合循环节点实现多工具自动依次调用
+    """
+    tool_queue = state.get("tool_queue", [])
+    exec_count = state.get("tool_exec_count", 0)
+    max_limit = state.get("max_tool_limit", 4)
+    old_results = state.get("tool_results", [])
+    old_slots = state.get("slots", {})
 
-    if not messages:
-        return {"session_status": "idle"}
+    # 循环终止条件1：队列为空
+    if not tool_queue:
+        return {"tool_results": old_results, "slots": old_slots}
 
-    last_msg = messages[-1]
-    if isinstance(last_msg, AIMessage) and hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-        return {"session_status": "idle"}  # 继续执行工具
+    # 循环终止条件2：超过最大调用次数
+    if exec_count >= max_limit:
+        logger.warning("已达到最大工具调用上限，终止工具循环")
+        return {"tool_results": old_results, "slots": old_slots}
 
-    # 透传已有数据，不丢弃
+    # 取出当前第一个待执行工具
+    current_tool = tool_queue[0]
+    remain_queue = tool_queue[1:]
+    tool_name = current_tool["name"]
+    tool_args = current_tool["args"]
+
+    tool_func = TOOL_MAP.get(tool_name)
+
+    # 工具执行
+    try:
+        tool_result = tool_func.invoke(tool_args)
+    except Exception as e:
+        logger.error(f"Tool call failed: {tool_name}, {e}")
+        tool_result = TOOL_ERROR_STRATEGY.get(tool_name, "服务暂时不可用")
+
+    # 追加槽位、追加结果，不覆盖原有数据
+    new_slots = dict(old_slots)
+    if "order_id" in tool_args:
+        new_slots["order_id"] = tool_args["order_id"]
+    if "phone" in tool_args:
+        new_slots["phone"] = tool_args["phone"]
+
+    new_results = old_results + [{"name": tool_name, "result": tool_result}]
+
     return {
-        "session_status": "idle",
-        "tool_results": tool_results,
-        "slots": slots,
-        "rag_docs": rag_docs,
+        "tool_results": new_results,
+        "slots": new_slots,
+        "tool_queue": remain_queue,
+        "tool_exec_count": exec_count + 1,
     }
 
 
-def tools_node(state: AgentState) -> AgentState:
+def tool_loop_check_node(state: AgentState) -> str:
     """
-    工具执行节点
-    从state中读取tool_name和tool_params执行
+    循环路由判断节点
+    工具跑完后判断：还有工具要执行吗？
+    有 → 回到tools继续执行
+    无 → 根据 need_rag 决定去 RAG 还是 summary
     """
-    tool_name = state.get("tool_name", "")
-    tool_params = state.get("tool_params", {})
+    queue = state.get("tool_queue", [])
+    exec_count = state.get("tool_exec_count", 0)
+    max_limit = state.get("max_tool_limit", 4)
+    need_rag = state.get("need_rag", False)
 
-    if not tool_name:
-        return {
-            "messages": [AIMessage(content="无工具调用")],
-            "session_status": "idle",
-            "tool_results": [],
-            "slots": {},
-        }
-
-    logger.info(f"Tool call: {tool_name}, params: {tool_params}")
-
-    new_slots = {}
-    if "order_id" in tool_params:
-        new_slots["order_id"] = tool_params["order_id"]
-    if "phone" in tool_params:
-        new_slots["phone"] = tool_params["phone"]
-
-    tool_func = TOOL_MAP.get(tool_name)
-    if tool_func:
-        try:
-            tool_result = tool_func.invoke(tool_params)
-        except Exception as e:
-            logger.error(f"Tool call failed: {e}")
-            tool_result = TOOL_ERROR_STRATEGY.get(tool_name, "服务暂时不可用")
-
-        return {
-            "messages": [
-                AIMessage(content=tool_result)
-            ],
-            "tool_results": [{"name": tool_name, "result": tool_result}],
-            "slots": new_slots,
-            "session_status": "idle",
-        }
+    # 还有工具 & 没超次数 → 继续循环执行工具
+    if queue and exec_count < max_limit:
+        return "tools"
+    # 工具全部跑完 + 需要 RAG → 进入 RAG 检索
+    elif need_rag:
+        return "rag"
+    # 工具全部跑完 + 不需要 RAG → 去汇总（脱敏处理）
     else:
-        return {
-            "messages": [
-                AIMessage(content=f"未知工具: {tool_name}")
-            ],
-            "tool_results": [{"name": tool_name, "result": f"未知工具: {tool_name}"}],
-            "session_status": "idle",
-            "slots": {},
-        }
+        return "summary"
 
 
 # ==================== 构建 Graph ====================
@@ -194,36 +277,46 @@ def tools_node(state: AgentState) -> AgentState:
 
 def create_agent_graph():
     from langgraph.graph import StateGraph, END
-    from langgraph.constants import Send
 
     graph = StateGraph(AgentState)
 
-    graph.add_node("rag", rag_node)
-    graph.add_node("agent", agent_node)
+    # 全企业节点
+    graph.add_node("check_slots", check_slots_node)
+    graph.add_node("clarify", clarify_node)
     graph.add_node("tools", tools_node)
+    graph.add_node("rag", rag_node)
+    graph.add_node("summary", summary_node)
 
-    graph.set_entry_point("agent")
+    # 入口：槽位校验
+    graph.set_entry_point("check_slots")
 
-    def need_route(state: AgentState) -> str:
-        tool_name = state.get("tool_name", "")
-        if tool_name:
-            return "tools"
-        if state.get("need_rag"):
-            return "rag"
-        return "end"
-
+    # 路由：槽位校验完 → 追问 或 工具
     graph.add_conditional_edges(
-        "agent",
-        need_route,
+        "check_slots",
+        lambda s: "clarify" if s.get("need_clarify") else "tools",
         {
-            "tools": "tools",
-            "rag": "rag",
-            "end": END,
-        },
+            "clarify": "clarify",
+            "tools": "tools"
+        }
     )
 
-    graph.add_edge("rag", END)
-    graph.add_edge("tools", "agent")
+    # 追问直接结束
+    graph.add_edge("clarify", END)
+
+    # 工具循环：tools 执行完后，根据 tool_loop_check_node 判断下一步
+    graph.add_conditional_edges(
+        "tools",
+        tool_loop_check_node,
+        {
+            "tools": "tools",    # 继续循环执行工具
+            "rag": "rag",       # 工具跑完，进入 RAG
+            "summary": "summary" # 工具跑完 + 不需要 RAG，去汇总
+        }
+    )
+
+    # RAG → 汇总
+    graph.add_edge("rag", "summary")
+    graph.add_edge("summary", END)
 
     return graph.compile()
 
@@ -260,7 +353,7 @@ def run_agent(
     if prev_turn_count >= MAX_TURNS:
         yield "对话已达最大轮次(8轮)，为保证服务质量已为您转接人工客服。\n人工客服工作时间: 周一至周五 9:00-18:00\n客服热线: 400-990-5898"
         memory.clear()
-        memory.set_session_status("transfering")
+        memory.set_session_status("idle")
         memory.increment_turn()
         return
 
@@ -291,21 +384,39 @@ def run_agent(
     need_rag = dispatch_result.need_rag
     need_tool = dispatch_result.need_tool
     need_clarify = dispatch_result.need_clarify
-    tool_name = dispatch_result.tool_name
-    tool_params = dispatch_result.tool_params
+    tool_calls = dispatch_result.tool_calls
 
     logger.info(
         f"LLM dispatch: need_rag={need_rag}, need_tool={need_tool}, "
-        f"tool_name={tool_name}, tool_params={tool_params}"
+        f"tool_calls={tool_calls}"
     )
 
-    intent = "product" if need_rag else "order"
+    if need_tool and tool_calls:
+        tool_names = [tc.get("name") for tc in tool_calls]
+        if "query_order" in tool_names or "query_logistics" in tool_names:
+            intent = "order"
+        elif "query_user_info" in tool_names:
+            intent = "user"
+        elif "transfer_to_human" in tool_names:
+            intent = "transfer"
+        else:
+            intent = "tool"
+    elif need_rag:
+        intent = "product"
+    else:
+        intent = "chat"
+
     session_status = "waiting" if need_clarify else "idle"
 
-    slots = extract_all_slots(user_input)
-    if tool_params:
-        slots = {**slots, **tool_params}
-    merged_slots = {**saved_slots, **slots}
+    user_slots = extract_all_slots(user_input)
+
+    tool_slots = {}
+    for tc in tool_calls:
+        args = tc.get("args", {})
+        if args:
+            tool_slots.update(args)
+
+    merged_slots = {**saved_slots, **tool_slots, **user_slots}
     new_context_entity = update_context_entity(merged_slots, saved_context_entity)
 
     turn_count = prev_turn_count + 1
@@ -322,45 +433,46 @@ def run_agent(
         "context_entity": new_context_entity,
         "session_status": session_status,
         "turn_count": turn_count,
-        "tool_name": tool_name,
-        "tool_params": tool_params,
+        "tool_calls": tool_calls,
+        "need_rag": need_rag,
+        "need_clarify": need_clarify,
+
+        # ========== 新增循环默认值 ==========
+        "tool_queue": tool_calls,     # 调度返回的工具全部扔进待执行队列
+        "tool_exec_count": 0,         # 初始已执行 0 个
+        "max_tool_limit": 4,          # 最多允许调用 4 个工具
+
+        # ========== 第三步新增 ==========
+        "step": "init",
+        "next_step": "check_slots",
     }
 
-    if need_clarify:
-        clarify_prompt = dispatch_result.clarify_prompt or "请问您具体想咨询什么？"
-        yield clarify_prompt
-        memory.add_user_message(user_input)
-        memory.add_ai_message(clarify_prompt)
-        memory.set_intent(intent)
-        memory.add_slots(merged_slots)
-        memory.add_context_entity(new_context_entity)
-        memory.set_session_status("waiting")
-        memory.increment_turn()
-        return
-        memory.increment_turn()
-        return
-
-    if not need_rag and not need_tool:
+    if not need_rag and not need_tool and not need_clarify:
+        # 只有真·闲聊才返回欢迎语
         chat_greetings = {"你好", "您好", "hi", "hello", "在吗", "在么", "有人吗", "哈喽"}
         chat_thanks = {"谢谢", "感谢", "谢了", "多谢"}
         chat_goodbyes = {"再见", "拜拜", "bye", "88", "回头聊"}
         user_lower = user_input.strip().lower()
         if any(word in user_lower for word in chat_greetings):
-            chat_response = "您好！我是智能客服，有什么可以帮您的吗？😊"
+            chat_response = "您好！我是智能客服，有什么可以帮您的吗？"
         elif any(word in user_lower for word in chat_thanks):
             chat_response = "不客气！很高兴能帮到您~"
         elif any(word in user_lower for word in chat_goodbyes):
-            chat_response = "再见！感谢您的咨询，祝您生活愉快！👋"
+            chat_response = "再见！感谢您的咨询，祝您生活愉快！"
         else:
             chat_response = "您好！我可以帮您查询产品、售后、订单、物流等问题，请问需要什么帮助？"
         yield chat_response
         memory.add_user_message(user_input)
         memory.add_ai_message(chat_response)
         memory.set_intent("chat")
+        memory.set_session_status("idle")
+        memory.add_slots(merged_slots)
+        memory.add_context_entity(new_context_entity)
         memory.increment_turn()
         return
 
     llm_with_tools = get_llm_with_tools()
+    final_clarify_prompt = None
     final_rag_docs = []
     final_tool_results = []
     final_session_status = "idle"
@@ -368,34 +480,35 @@ def run_agent(
     final_slots = initial_state.get("slots", {})
     final_context_entity = initial_state.get("context_entity", {})
 
-    if need_rag:
-        try:
-            rag = get_rag()
-            docs = rag.multi_search(user_input, k=2, vector_k=5, bm25_k=5)
-            final_rag_docs = [d.page_content for d in docs]
-        except Exception as e:
-            logger.warning(f"RAG search failed: {e}")
-            try:
-                docs = rag.similarity_search(user_input, k=2)
-                final_rag_docs = [d.page_content for d in docs]
-            except Exception as e2:
-                final_rag_docs = []
+    agent_graph = get_agent_graph()
+    final_state = agent_graph.invoke(initial_state)
 
-    if need_tool and tool_name:
-        try:
-            tools_result = tools_node(initial_state)
-            if "tool_results" in tools_result:
-                final_tool_results = tools_result["tool_results"]
-            if "slots" in tools_result and tools_result["slots"]:
-                final_slots = {**final_slots, **tools_result["slots"]}
-        except Exception as e:
-            logger.error(f"Tool execution failed: {e}")
-            final_tool_results = [{"name": tool_name, "result": "服务暂时不可用"}]
+    # 从最终完整 state 读取结果
+    final_clify_prompt = final_state.get("clarify_prompt")
+    final_rag_docs = final_state.get("rag_docs", [])
+    final_tool_results = final_state.get("tool_results", [])
+    final_slots = final_state.get("slots", {})
+
+    # 检查是否需要追问
+    if final_clarify_prompt:
+        yield final_clarify_prompt
+        memory.add_user_message(user_input)
+        memory.add_ai_message(final_clarify_prompt)
+        memory.set_intent(intent)
+        memory.add_slots(merged_slots)
+        memory.add_context_entity(new_context_entity)
+        memory.set_session_status("waiting")
+        memory.increment_turn()
+        return
 
     final_session_status = "idle"
 
     llm_messages = [
-        SystemMessage(content="你是机械革命官方客服，仅使用提供的资料回答，不编造。")
+        SystemMessage(
+            content="你是机械革命官方客服。整合工具查询结果，用通顺自然的中文排版回复用户。\n"
+                    "禁止复述字段名、禁止输出参数、禁止输出原始调用信息。\n"
+                    "信息简洁完整，分点清晰，不编造内容。"
+        )
     ]
 
     if history:

@@ -17,7 +17,7 @@ class LLMConfig:
     """LLM 配置"""
 
     provider: str = "ollama"
-    model: str = "qwen3.5:4b"
+    model: str = "deepseek-r1:1.5b"
     temperature: float = 0.7
     base_url: str = "http://localhost:11434"
     api_key: str = "ollama"
@@ -101,7 +101,7 @@ def load_config() -> AppConfig:
         llm_provider=llm_provider,
         llm=LLMConfig(
             provider=llm_provider,
-            model=os.getenv("LLM_MODEL", "qwen3.5:4b"),
+            model=os.getenv("LLM_MODEL", "deepseek-r1:1.5b"),
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
 
