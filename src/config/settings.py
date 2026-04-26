@@ -1,7 +1,7 @@
 """
 项目配置模块
 
-从环境变量加载配置，支持多种 LLM 提供商
+从环境变量加载配置，支持多种 LLM 提供商（ollama / siliconflow）
 """
 
 import os
@@ -94,22 +94,18 @@ class AppConfig:
 
 def load_config() -> AppConfig:
     """从环境变量加载配置"""
-    # LLM 提供商：ollama / siliconflow
-    llm_provider = os.getenv("LLM_PROVIDER", "ollama").lower()
-
     return AppConfig(
-        llm_provider=llm_provider,
+        llm_provider="siliconflow",
         llm=LLMConfig(
-            provider=llm_provider,
-            model=os.getenv("LLM_MODEL", "deepseek-r1:1.5b"),
+            provider="ollama",
+            model="deepseek-r1:1.5b",
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
-
         ),
         siliconflow=SiliconFlowConfig(
             base_url=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
             api_key=os.getenv("SILICONFLOW_API_KEY"),
-            model=os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen3.5-9B"),
+            model=os.getenv("LLM_MODEL", "Qwen/Qwen3.5-9B"),
         ),
         langsmith=LangSmithConfig(
             api_key=os.getenv("LANGCHAIN_API_KEY"),

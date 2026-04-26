@@ -1,7 +1,7 @@
 """
 数据模型定义
 
-干净的 State 定义，仅保留核心字段
+定义 Agent 状态类型和调度结果类型
 """
 
 from typing import TypedDict, Annotated, Optional, Dict, Any, List

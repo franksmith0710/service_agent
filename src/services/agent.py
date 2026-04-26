@@ -1,10 +1,10 @@
 """
-Agent 服务模块
+Agent 核心服务模块
 
-两层级 LLM 架构：
-- 决策 LLM (run_agent 入口)：意图识别、路由决策
-- Graph 执行层：RAG 检索 + 工具执行（0 LLM）
-- 生成 LLM (run_agent 末尾)：整合所有原料生成回答
+采用两级 LLM 架构：
+- 决策 LLM：意图识别、路由决策（run_agent 入口调用）
+- 执行层：Graph 流程处理 RAG 检索 + 工具执行（零 LLM 调用）
+- 生成 LLM：整合所有素材生成最终回答（run_agent 末尾调用）
 """
 
 import os
@@ -30,6 +30,18 @@ from src.services.intent import (
     resolve_coreference,
     update_context_entity,
     is_interrupt,
+)
+from src.services.prompts import (
+    GREETINGS,
+    THANKS,
+    GOODBYES,
+    CHAT_GREETING,
+    CHAT_THANKS,
+    CHAT_GOODBYE,
+    CHAT_DEFAULT,
+    CLARIFY_ORDER,
+    CLARIFY_DEFAULT,
+    GENERATION_SYSTEM_PROMPT,
 )
 from src.services.rag import get_rag
 import warnings
@@ -76,7 +88,7 @@ TOOL_MAP = {
 
 # ==================== LLM 工具绑定缓存 ====================
 
-from src.services.llm import get_llm_with_tools
+from src.services.llm import get_llm_for_generation
 
 
 # ==================== 节点函数 ====================
@@ -120,7 +132,7 @@ def rag_node(state: AgentState) -> AgentState:
 @safe_node
 def check_slots_node(state: AgentState) -> AgentState:
     """
-    企业级槽位校验
+    槽位校验
     订单/物流必须有 order_id 或 phone，没有 → 强制追问
     """
     intent = state.get("intent", "")
@@ -130,7 +142,7 @@ def check_slots_node(state: AgentState) -> AgentState:
         if not slots.get("order_id") and not slots.get("phone"):
             return {
                 "need_clarify": True,
-                "clarify_prompt": "请提供您的订单号或手机号，以便为您查询",
+                "clarify_prompt": CLARIFY_ORDER,
                 "step": "clarify",
                 "next_step": "end"
             }
@@ -148,7 +160,7 @@ def clarify_node(state: AgentState) -> AgentState:
     追问回复节点（仅输出提示，不执行工具）
     从 state 中读取 clarify_prompt 并存入返回 state
     """
-    clarify_prompt = state.get("clarify_prompt", "请问您具体想咨询什么？")
+    clarify_prompt = state.get("clarify_prompt", CLARIFY_DEFAULT)
     return {
         "clarify_prompt": clarify_prompt,
         "step": "end",
@@ -199,7 +211,7 @@ MAX_TURNS = 8
 @safe_node
 def tools_node(state: AgentState) -> AgentState:
     """
-    企业ReAct工具节点：单次执行一个工具
+    ReAct工具节点：单次执行一个工具
     配合循环节点实现多工具自动依次调用
     """
     tool_queue = state.get("tool_queue", [])
@@ -299,7 +311,6 @@ def create_agent_graph():
             "tools": "tools"
         }
     )
-
     # 追问直接结束
     graph.add_edge("clarify", END)
 
@@ -373,7 +384,7 @@ def run_agent(
         logger.info(f"Coreference resolved: {user_input}")
 
     raw_state = {
-        "messages": history + [HumanMessage(content=user_input)],
+        "messages": history[-4:] + [HumanMessage(content=user_input)],
         "session_id": session_id,
         "slots": saved_slots,
         "context_entity": saved_context_entity,
@@ -448,19 +459,15 @@ def run_agent(
     }
 
     if not need_rag and not need_tool and not need_clarify:
-        # 只有真·闲聊才返回欢迎语
-        chat_greetings = {"你好", "您好", "hi", "hello", "在吗", "在么", "有人吗", "哈喽"}
-        chat_thanks = {"谢谢", "感谢", "谢了", "多谢"}
-        chat_goodbyes = {"再见", "拜拜", "bye", "88", "回头聊"}
         user_lower = user_input.strip().lower()
-        if any(word in user_lower for word in chat_greetings):
-            chat_response = "您好！我是智能客服，有什么可以帮您的吗？"
-        elif any(word in user_lower for word in chat_thanks):
-            chat_response = "不客气！很高兴能帮到您~"
-        elif any(word in user_lower for word in chat_goodbyes):
-            chat_response = "再见！感谢您的咨询，祝您生活愉快！"
+        if any(word in user_lower for word in GREETINGS):
+            chat_response = CHAT_GREETING
+        elif any(word in user_lower for word in THANKS):
+            chat_response = CHAT_THANKS
+        elif any(word in user_lower for word in GOODBYES):
+            chat_response = CHAT_GOODBYE
         else:
-            chat_response = "您好！我可以帮您查询产品、售后、订单、物流等问题，请问需要什么帮助？"
+            chat_response = CHAT_DEFAULT
         yield chat_response
         memory.add_user_message(user_input)
         memory.add_ai_message(chat_response)
@@ -471,7 +478,6 @@ def run_agent(
         memory.increment_turn()
         return
 
-    llm_with_tools = get_llm_with_tools()
     final_clarify_prompt = None
     final_rag_docs = []
     final_tool_results = []
@@ -484,7 +490,7 @@ def run_agent(
     final_state = agent_graph.invoke(initial_state)
 
     # 从最终完整 state 读取结果
-    final_clify_prompt = final_state.get("clarify_prompt")
+    final_clarify_prompt = final_state.get("clarify_prompt")
     final_rag_docs = final_state.get("rag_docs", [])
     final_tool_results = final_state.get("tool_results", [])
     final_slots = final_state.get("slots", {})
@@ -504,15 +510,13 @@ def run_agent(
     final_session_status = "idle"
 
     llm_messages = [
-        SystemMessage(
-            content="你是机械革命官方客服。整合工具查询结果，用通顺自然的中文排版回复用户。\n"
-                    "禁止复述字段名、禁止输出参数、禁止输出原始调用信息。\n"
-                    "信息简洁完整，分点清晰，不编造内容。"
-        )
+        SystemMessage(content=GENERATION_SYSTEM_PROMPT)
     ]
 
-    if history:
-        llm_messages.extend(history)
+    # 只保留最近2轮完整对话（4条消息），避免爆上下文
+    recent_msgs = history[-4:]
+    if recent_msgs:
+        llm_messages.extend(recent_msgs)
 
     rag_context = "\n".join(final_rag_docs) if need_rag else ""
     if rag_context:
@@ -528,7 +532,7 @@ def run_agent(
     llm_messages.append(HumanMessage(content=user_input))
 
     final_text = ""
-    for msg in llm_with_tools.stream(llm_messages):
+    for msg in get_llm_for_generation().stream(llm_messages):
         if msg.content:
             if enable_stream:
                 for char in msg.content:

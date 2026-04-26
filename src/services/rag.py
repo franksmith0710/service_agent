@@ -2,7 +2,8 @@
 RAG 知识库服务模块
 
 提供基于 Chroma 的向量知识库检索
-支持从 data/kb_*.txt 加载知识库数据
+支持多路召回（向量 + BM25 融合）
+从 data/kb_*.txt 加载知识库数据
 """
 
 import os

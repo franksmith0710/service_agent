@@ -2,7 +2,7 @@
 意图识别与调度模块
 
 基于 LLM 的动态调度决策
-支持：RAG / Tool / 混合 / 追问 / 转人工
+支持：RAG 检索 / 工具调用 / 混合模式 / 追问澄清 / 转人工客服
 """
 
 import re
@@ -13,23 +13,19 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config.logger import get_logger
 from src.models.types import AgentState, DispatchResult
+from .prompts import (
+    DISPATCH_PROMPT,
+    PRODUCT_KEYWORDS,
+    FAULT_KEYWORDS,
+    PRODUCT_QUERY_KEYWORDS,
+    COREFERENCE_PATTERNS,
+    INTERRUPT_PATTERNS,
+    GREETINGS,
+    THANKS,
+    TRANSFER_KEYWORDS,
+)
 
 logger = get_logger(__name__)
-
-SIMPLIFIED_PROMPT = """你是机械革命笔记本客服调度专家，仅做业务分流决策。
-
-分流决策规则：
-1. 产品相关咨询、模糊机型称呼、参数疑问 → need_rag=true
-2. 用户问候、闲聊 → need_rag=false, need_tool=false
-3. 无法判断时 → need_rag=true
-
-要求：
-1. 输出标准合法JSON
-2. 只输出一行纯JSON，无多余文字
-
-输出模板：
-{"need_rag":false,"need_tool":false,"need_clarify":false,"tool_calls":[],"clarify_prompt":""}
-"""
 
 
 def _parse_dispatch_result(response_content: str) -> DispatchResult:
@@ -58,9 +54,9 @@ def _parse_dispatch_result(response_content: str) -> DispatchResult:
         return DispatchResult(
             need_rag=False,
             need_tool=False,
-            need_clarify=False,
+            need_clarify=True,
             tool_calls=[],
-            clarify_prompt="",
+            clarify_prompt="抱歉，我未能理解您的意思，请尝试重新描述您的问题",
         )
 
 
@@ -69,18 +65,30 @@ def llm_dispatch_by_mini_model(state: AgentState) -> DispatchResult:
     try:
         messages = state["messages"]
         if not messages:
-            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, tool_calls=[], clarify_prompt="")
+            return DispatchResult(
+                need_rag=False,
+                need_tool=False,
+                need_clarify=True,
+                tool_calls=[],
+                clarify_prompt="我仅提供机械革命产品、售后、订单、物流相关咨询服务，暂不支持闲聊",
+            )
 
         user_input = messages[-1].content
         if not user_input or not user_input.strip():
-            return DispatchResult(need_rag=False, need_tool=False, need_clarify=False, tool_calls=[], clarify_prompt="")
+            return DispatchResult(
+                need_rag=False,
+                need_tool=False,
+                need_clarify=True,
+                tool_calls=[],
+                clarify_prompt="我仅提供机械革命产品、售后、订单、物流相关咨询服务，暂不支持闲聊",
+            )
 
         history = messages[:-1]
 
         from src.services.llm import get_llm
         llm = get_llm()
 
-        msgs = [SystemMessage(content=SIMPLIFIED_PROMPT)]
+        msgs = [SystemMessage(content=DISPATCH_PROMPT)]
         msgs.extend(history)
         msgs.append(HumanMessage(content=user_input))
 
@@ -88,18 +96,30 @@ def llm_dispatch_by_mini_model(state: AgentState) -> DispatchResult:
 
         if not hasattr(response, "content") or not response.content or response.content.strip() == "":
             logger.warning("模型返回空，使用兜底决策")
-            return DispatchResult(need_rag=True, need_tool=False, need_clarify=False, tool_calls=[], clarify_prompt="")
+            return DispatchResult(
+                need_rag=False,
+                need_tool=False,
+                need_clarify=True,
+                tool_calls=[],
+                clarify_prompt="我仅提供机械革命产品、售后、订单、物流相关咨询服务，暂不支持闲聊",
+            )
 
         return _parse_dispatch_result(response.content)
 
     except Exception as e:
         logger.error(f"小模型调度异常: {e}")
-        return DispatchResult(need_rag=True, need_tool=False, need_clarify=False, tool_calls=[], clarify_prompt="")
+        return DispatchResult(
+            need_rag=False,
+            need_tool=False,
+            need_clarify=True,
+            tool_calls=[],
+            clarify_prompt="我仅提供机械革命产品、售后、订单、物流相关咨询服务，暂不支持闲聊",
+        )
 
 
 def llm_dispatch(state: AgentState) -> DispatchResult:
     """
-    企业级调度：规则优先 + 小模型兜底
+    调度：规则优先 + 小模型兜底
     规则 100% 覆盖明确场景，不占用模型
     """
     try:
@@ -126,7 +146,7 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
             if phone:
                 tool_args["phone"] = phone
 
-            # 企业规则：自动识别并添加多个工具
+            # 自动识别并添加多个工具
             tool_list = []
 
             # 有订单号 → 查订单 + 物流
@@ -142,7 +162,7 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
                 need_rag=False,
                 need_tool=True,
                 need_clarify=False,
-                tool_calls=tool_list,  # 多工具自动进队列
+                tool_calls=tool_list, 
                 clarify_prompt=""
             )
 
@@ -157,8 +177,18 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
             )
 
         # ====== 规则 3：提到产品相关 → RAG 检索 ======
-        product_keywords = ["产品", "配置", "参数", "性能", "价格", "多少钱", "怎么样", "好不好"]
-        if any(k in user_input_lower for k in product_keywords + [p.lower() for p in PRODUCT_KEYWORDS]):
+        if any(k in user_input_lower for k in PRODUCT_QUERY_KEYWORDS + [p.lower() for p in PRODUCT_KEYWORDS]):
+            return DispatchResult(
+                need_rag=True,
+                need_tool=False,
+                need_clarify=False,
+                tool_calls=[],
+                clarify_prompt=""
+            )
+        
+        # ====== 规则 3.5：故障问题 → 直接 RAG ======
+        fault_words = [k.lower() for k in FAULT_KEYWORDS]
+        if any(k in user_input_lower for k in fault_words):
             return DispatchResult(
                 need_rag=True,
                 need_tool=False,
@@ -168,7 +198,7 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
             )
 
         # ====== 规则 4：明确转人工 ======
-        if any(k in user_input_lower for k in ["人工", "转人工", "投诉", "找人"]):
+        if any(k in user_input_lower for k in TRANSFER_KEYWORDS):
             return DispatchResult(
                 need_tool=True,
                 tool_calls=[{"name": "transfer_to_human", "args": {"reason": "用户主动要求转人工"}}],
@@ -178,9 +208,7 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
             )
 
         # ====== 规则 5：简单问候 → 直接聊天 ======
-        greetings = ["你好", "您好", "hi", "hello", "嗨"]
-        thanks = ["谢谢", "感谢", "thx", "thanks"]
-        if any(k in user_input_lower for k in greetings + thanks):
+        if any(k in user_input_lower for k in GREETINGS + THANKS):
             return DispatchResult(
                 need_rag=False,
                 need_tool=False,
@@ -188,6 +216,8 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
                 tool_calls=[],
                 clarify_prompt=""
             )
+
+        
 
         # ====== 兜底：小模型处理模糊语句 ======
         logger.info("规则无法覆盖，调用小模型兜底")
@@ -233,37 +263,8 @@ def get_rag_filter_from_intent(intent: str) -> Optional[dict]:
     return filter_map.get(intent)
 
 
-PRODUCT_KEYWORDS = [
-    "耀世",
-    "蛟龙",
-    "极光",
-    "无界",
-    "旷世",
-    "翼龙",
-    "深海",
-    "泰坦",
-    "小白",
-]
-
-FAULT_KEYWORDS = {
-    "蓝屏": "蓝屏",
-    "死机": "死机",
-    "黑屏": "黑屏",
-    "无法开机": "无法开机",
-    "充电": "充电问题",
-    "电池": "电池问题",
-    "发热": "发热问题",
-    "风扇": "风扇问题",
-    "花屏": "花屏",
-    "闪退": "闪退",
-    "卡顿": "卡顿",
-    "重装": "重装系统",
-    "驱动": "驱动问题",
-}
-
-
 def extract_order_id(text: str) -> Optional[str]:
-    """从文本中提取订单号"""
+    """从文本中提取订单号（排除11位手机号）"""
     text = text.lower()
     patterns = [
         r"订单号[：:\s]*(\d{10,})",
@@ -272,7 +273,10 @@ def extract_order_id(text: str) -> Optional[str]:
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
-            return match.group(1)
+            order_id = match.group(1)
+            if len(order_id) == 11 and re.match(r"1[3-9]\d{9}", order_id):
+                continue
+            return order_id
     return None
 
 
@@ -299,8 +303,8 @@ def extract_product(text: str) -> Optional[str]:
 def extract_fault_type(text: str) -> Optional[str]:
     """从文本中提取故障类型"""
     text = text.lower()
-    for keyword, fault_type in FAULT_KEYWORDS.items():
-        if keyword in text:
+    for fault_type in FAULT_KEYWORDS:
+        if fault_type in text:
             return fault_type
     return None
 
@@ -325,19 +329,6 @@ def extract_all_slots(text: str) -> dict:
     return slots
 
 
-COREFERENCE_PATTERNS = [
-    "那款",
-    "这款",
-    "它",
-    "刚才那个",
-    "刚才那个订单",
-    "刚才那个产品",
-    "上一个",
-    "上一个订单",
-    "上一个产品",
-]
-
-
 def resolve_coreference(text: str, context_entity: dict) -> str:
     """
     指代消解
@@ -353,19 +344,16 @@ def resolve_coreference(text: str, context_entity: dict) -> str:
     if not context_entity:
         return text
 
-    text_lower = text.lower()
-
     for pattern in COREFERENCE_PATTERNS:
-        if pattern in text_lower:
-            if "product" in context_entity or "order" in context_entity:
-                result = text
-                if context_entity.get("last_product"):
-                    result = result.replace(pattern, context_entity["last_product"])
-                if context_entity.get("last_order"):
-                    result = result.replace(pattern, context_entity["last_order"])
-                if context_entity.get("last_phone"):
-                    result = result.replace(pattern, context_entity["last_phone"])
-                return result
+        if re.search(pattern, text, re.IGNORECASE):
+            result = text
+            if context_entity.get("last_product"):
+                result = re.sub(pattern, context_entity["last_product"], result, flags=re.IGNORECASE)
+            elif context_entity.get("last_order"):
+                result = re.sub(pattern, context_entity["last_order"], result, flags=re.IGNORECASE)
+            elif context_entity.get("last_phone"):
+                result = re.sub(pattern, context_entity["last_phone"], result, flags=re.IGNORECASE)
+            return result
 
     return text
 
@@ -399,18 +387,6 @@ def update_context_entity(slots: dict, context_entity: dict) -> dict:
         new_entity["last_phone_time"] = int(time.time())
 
     return new_entity
-
-
-INTERRUPT_PATTERNS = [
-    "算了",
-    "先不提了",
-    "换个话题",
-    "暂停",
-    "先这样",
-    "不要了",
-    "不提这个了",
-    "换一个",
-]
 
 
 def is_interrupt(text: str) -> bool:

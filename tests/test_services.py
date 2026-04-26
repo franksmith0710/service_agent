@@ -9,8 +9,8 @@ class TestConfig:
         """测试配置加载"""
         config = load_config()
         assert isinstance(config, AppConfig)
-        assert config.llm_provider in ["ollama", "siliconflow"]
-        assert config.llm.model == "qwen3.5:4b"
+        assert config.llm_provider == "siliconflow"
+        assert config.llm.model == "deepseek-r1:1.5b"
 
     def test_llm_config(self):
         """测试 LLM 配置"""
