@@ -43,26 +43,31 @@ class LLMManager:
         logger.info("LLM manager reset")
 
     def _create_llm_dispatch(self) -> BaseChatModel:
-        """调度模型：DeepSeek-R1 推理模型"""
-        from langchain_ollama import ChatOllama
-        return ChatOllama(
-            model="deepseek-r1:1.5b",
-            base_url=config.llm.base_url,
+        """调度模型：SiliconFlow DeepSeek"""
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=config.siliconflow.dispatch_model,
+            base_url=config.siliconflow.base_url,
+            api_key=config.siliconflow.api_key,
             temperature=0.1,
-            num_predict=512,
+            max_tokens=512,
         )
 
     def _create_llm_generation(self) -> BaseChatModel:
         """生成模型：正常回答、能写长文本、自然"""
         from langchain_openai import ChatOpenAI
+
         return ChatOpenAI(
             model=config.siliconflow.model,
             base_url=config.siliconflow.base_url,
             api_key=config.siliconflow.api_key,
             temperature=0.7,
-            max_tokens=1024,
-            request_timeout=30,
-            max_retries=2,
+            top_p=0.7,
+            max_tokens=512,
+            frequency_penalty=0.0,
+            request_timeout=10,
+            max_retries=1,
+            stream=True,
         )
 
 

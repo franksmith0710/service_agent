@@ -162,6 +162,88 @@ async def get_history(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/tickets")
+async def get_tickets(status: str = "pending", limit: int = 50):
+    """
+    获取转人工工单列表
+
+    Args:
+        status: 工单状态 (pending/processing/resolved/all)
+        limit: 返回数量限制
+
+    Returns:
+        工单列表
+    """
+    try:
+        from src.services.postgres import (
+            get_tickets_by_status,
+            get_all_tickets,
+        )
+
+        if status == "all":
+            tickets = get_all_tickets(limit)
+        else:
+            tickets = get_tickets_by_status(status, limit)
+
+        return {"status": status, "tickets": tickets, "count": len(tickets)}
+    except Exception as e:
+        logger.error(f"Get tickets error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/tickets/{ticket_id}")
+async def get_ticket(ticket_id: str):
+    """
+    获取单个工单详情
+
+    Args:
+        ticket_id: 工单号
+
+    Returns:
+        工单详情
+    """
+    try:
+        from src.services.postgres import get_ticket_by_id
+
+        ticket = get_ticket_by_id(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+
+        return ticket
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get ticket error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tickets/{ticket_id}/resolve")
+async def resolve_ticket(ticket_id: str):
+    """
+    标记工单为已处理
+
+    Args:
+        ticket_id: 工单号
+
+    Returns:
+        操作结果
+    """
+    try:
+        from src.services.postgres import update_ticket_status
+
+        success = update_ticket_status(ticket_id, "resolved")
+        if not success:
+            raise HTTPException(status_code=404, detail="工单不存在")
+
+        logger.info(f"Ticket resolved: {ticket_id}")
+        return {"success": True, "ticket_id": ticket_id, "status": "resolved"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Resolve ticket error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
 

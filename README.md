@@ -8,7 +8,7 @@
 
 - **多轮对话**: 基于内存存储的对话历史，跨轮次保持上下文
 - **双 LLM 架构**:
-  - 调度模型 (deepseek-r1:1.5b Ollama): 意图识别、路由决策、槽位提取、工具调用
+  - 调度模型 (SiliconFlow DeepSeek-R1): 意图识别、路由决策、槽位提取、工具调用
   - 生成模型 (SiliconFlow Qwen): 整合信息生成自然回复
 - **槽位管理**: 自动提取并累积手机号、订单号、产品型号、故障类型
 - **指代消解**: 智能解析"那款"、"它"、"刚才那个"等指代词
@@ -29,11 +29,11 @@
 
 ## 技术栈
 
-- **调度 LLM**: Ollama (deepseek-r1:1.5b) - 本地推理模型，快速决策
+- **调度 LLM**: SiliconFlow (DeepSeek-R1-0528-Qwen3-8B) - 云端推理模型，快速决策
 - **生成 LLM**: SiliconFlow (Qwen/Qwen3.5-9B) - 云端大模型，高质量生成
 - **框架**: LangChain + LangGraph (StateGraph)
 - **向量库**: Chroma
-- **嵌入模型**: Ollama (bge-m3)
+- **嵌入模型**: Ollama (bge-m3) - 本地嵌入
 - **数据库**: PostgreSQL (结构化数据) + Chroma (向量数据)
 - **前端**: Streamlit / FastAPI
 - **存储**: 内存存储 (对话记忆)
@@ -84,7 +84,7 @@ kefu_agent/
 ### 双 LLM 设计
 
 1. **调度模型 (`get_llm()`)**
-   - 模型: deepseek-r1:1.5b (Ollama 本地)
+   - 模型: DeepSeek-R1-0528-Qwen3-8B (SiliconFlow 云端)
    - 职责: 意图识别、路由决策、工具调用判断
    - 特点: 绑定工具，可触发 ReAct 执行
    - 输出: JSON 格式 (need_rag, need_tool, need_clarify, tool_calls)
@@ -116,7 +116,7 @@ kefu_agent/
   │   ├─ check_slots: 校验槽位
   │   ├─ tools: 执行工具 (最多4个)
   │   ├─ rag: 多路召回 (向量 + BM25)
-  │   └─ summary: 汇总处理 (脱敏/去重/截断)
+  │   └─ summary: 汇总处理 (脱敏/去重)
   ├─ 生成回复 (整合 RAG + 工具结果)
   └─ 保存记忆 (累加 slots, turn_count++)
 ```
@@ -136,16 +136,15 @@ pip install -r requirements.txt
 创建 `.env` 文件:
 
 ```env
-# LLM 配置
-LLM_MODEL=deepseek-r1:1.5b
-OLLAMA_BASE_URL=http://localhost:11434
-
-# SiliconFlow 配置 (生成模型)
+# SiliconFlow 配置 (必需)
 SILICONFLOW_API_KEY=your-api-key
+SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
 SILICONFLOW_MODEL=Qwen/Qwen3.5-9B
+DISPATCH_MODEL=deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
 
 # 嵌入模型
 EMBEDDING_MODEL=bge-m3
+OLLAMA_BASE_URL=http://localhost:11434
 
 # Chroma 向量库
 CHROMA_DIR=./chroma_db
@@ -201,7 +200,7 @@ GET /
 {
   "message": "智能客服 API",
   "version": "1.0.0",
-  "dispatch_model": "deepseek-r1:1.5b",
+  "dispatch_model": "DeepSeek-R1-0528-Qwen3-8B",
   "generation_provider": "siliconflow",
   "generation_model": "Qwen/Qwen3.5-9B"
 }
@@ -286,10 +285,9 @@ GET /history/{session_id}
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| LLM_MODEL | 调度模型名称 | deepseek-r1:1.5b |
+| SILICONFLOW_BASE_URL | SiliconFlow API 地址 | https://api.siliconflow.cn/v1 |
+| EMBEDDING_MODEL | 嵌入模型名称 | bge-m3 |
 | OLLAMA_BASE_URL | Ollama 服务地址 | http://localhost:11434 |
-| SILICONFLOW_API_KEY | SiliconFlow API Key | - |
-| SILICONFLOW_MODEL | SiliconFlow 生成模型 | Qwen/Qwen3.5-9B |
 | EMBEDDING_MODEL | 嵌入模型名称 | bge-m3 |
 | CHROMA_DIR | Chroma 持久化目录 | ./chroma_db |
 | POSTGRES_HOST | PostgreSQL 地址 | localhost |
@@ -382,7 +380,7 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
 
 ```python
 def get_llm() -> BaseChatModel:
-    """调度模型 (deepseek-r1:1.5b)，绑定工具用于意图识别"""
+    """调度模型 (SiliconFlow DeepSeek-R1)，绑定工具用于意图识别"""
 
 def get_llm_for_generation() -> BaseChatModel:
     """生成模型 (SiliconFlow Qwen)，纯文字生成"""
@@ -514,7 +512,7 @@ pytest tests/test_services.py -v
 可能原因：
 1. SiliconFlow Qwen 9B 本身 API 响应较慢
 2. 上下文太长（历史消息 + RAG 结果 + 工具结果）
-3. max_tokens=1024 限制，可根据需求调整
+3. 生成模型 max_tokens=512 限制，可根据需求调整
 
 ### Q: 如何切换生成模型？
 

@@ -30,6 +30,7 @@ class SiliconFlowConfig:
     base_url: str = "https://api.siliconflow.cn/v1"
     api_key: Optional[str] = None
     model: str = "Qwen/Qwen3.5-9B"
+    dispatch_model: str = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
 
 
 @dataclass
@@ -106,6 +107,7 @@ def load_config() -> AppConfig:
             base_url=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
             api_key=os.getenv("SILICONFLOW_API_KEY"),
             model=os.getenv("LLM_MODEL", "Qwen/Qwen3.5-9B"),
+            dispatch_model=os.getenv("DISPATCH_MODEL", "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"),
         ),
         langsmith=LangSmithConfig(
             api_key=os.getenv("LANGCHAIN_API_KEY"),

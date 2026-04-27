@@ -5,7 +5,6 @@
 纯内存存储，进程级生命周期
 """
 
-import json
 from typing import Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
@@ -16,7 +15,6 @@ logger = get_logger(__name__)
 _memory_store: dict[str, list[BaseMessage]] = {}
 _intent_store: dict[str, str] = {}
 _slots_store: dict[str, dict] = {}
-_task_state_store: dict[str, str] = {}
 _turn_count_store: dict[str, int] = {}
 _context_entity_store: dict[str, dict] = {}
 _session_status_store: dict[str, str] = {}
@@ -54,8 +52,6 @@ class ChatMemory:
             del _intent_store[self.session_id]
         if self.session_id in _slots_store:
             del _slots_store[self.session_id]
-        if self.session_id in _task_state_store:
-            del _task_state_store[self.session_id]
         if self.session_id in _turn_count_store:
             del _turn_count_store[self.session_id]
         if self.session_id in _context_entity_store:
@@ -80,14 +76,6 @@ class ChatMemory:
     def get_slots(self) -> dict:
         """获取槽位"""
         return _slots_store.get(self.session_id, {})
-
-    def set_task_state(self, state: str) -> None:
-        """保存任务状态"""
-        _task_state_store[self.session_id] = state
-
-    def get_task_state(self) -> str:
-        """获取任务状态"""
-        return _task_state_store.get(self.session_id, "pending")
 
     def increment_turn(self) -> int:
         """增加轮次"""
@@ -120,22 +108,6 @@ class ChatMemory:
     def get_session_status(self) -> str:
         """获取会话状态"""
         return _session_status_store.get(self.session_id, "idle")
-
-    def save_session_state(self, state: dict) -> None:
-        """保存完整会话状态（用于打断恢复）"""
-        _slots_store[self.session_id] = state.get("slots", {})
-        _context_entity_store[self.session_id] = state.get("context_entity", {})
-        _session_status_store[self.session_id] = state.get("session_status", "idle")
-        _intent_store[self.session_id] = state.get("intent", "")
-
-    def restore_session_state(self) -> dict:
-        """恢复会话状态"""
-        return {
-            "slots": _slots_store.get(self.session_id, {}),
-            "context_entity": _context_entity_store.get(self.session_id, {}),
-            "session_status": _session_status_store.get(self.session_id, "idle"),
-            "intent": _intent_store.get(self.session_id, ""),
-        }
 
 
 def get_memory(session_id: str) -> ChatMemory:

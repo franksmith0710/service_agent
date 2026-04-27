@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: kefu_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - kefu_network
+
+  db:
+    image: postgres:15
+    container_name: kefu_postgres
+    environment:
+      POSTGRES_DB: kefu_agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123456
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kefu_network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kefu_app
+    ports:
+      - "8000:8000"
+      - "8501:8501"
+    volumes:
+      - ./data/chroma:/app/chroma_db
+      - ./data/kb:/app/data
+      - ./.env:/app/.env:ro
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=db
+      - OLLAMA_BASE_URL=http://ollama:11434
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    networks:
+      - kefu_network
+
+networks:
+  kefu_network:
+    driver: bridge

@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Data & Logs
+*.log
+logs/
+*.sqlite3
+chroma_db/
+data/chroma/
+
+# Environment files (keep .env for docker)
+.env.example
+!.env
+
+# Cache
+.ruff_cache/
+.mypy_cache/
+.dmypy/
+.pyre/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local scripts (not needed in container)
+scripts/*.py
+scripts/insert_users.py
+scripts/init_all.py
+
+# Test files
+tests/

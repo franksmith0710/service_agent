@@ -6,7 +6,6 @@ Agent 工具模块
 """
 
 import json
-from datetime import datetime
 from typing import Optional, Dict, Any
 from langchain_core.tools import tool
 
@@ -17,6 +16,7 @@ from src.services.postgres import (
     get_user_by_id,
     get_user_by_phone,
     search_orders,
+    create_transfer_ticket,
 )
 
 from src.config.logger import get_logger
@@ -198,31 +198,43 @@ def query_user_info(phone: str) -> str:
 
 
 @tool
-def transfer_to_human(reason: str, conversation_summary: Optional[str] = None) -> str:
+def transfer_to_human(
+    reason: str,
+    conversation_summary: Optional[str] = None,
+    user_id: Optional[str] = None,
+    phone: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> str:
     """
     转接人工客服。
 
     Args:
         reason: 转接原因
         conversation_summary: 对话摘要（可选）
+        user_id: 用户ID（可选）
+        phone: 手机号（可选）
+        session_id: 会话ID（可选）
 
     Returns:
         转接结果字符串
     """
     try:
-        ticket_id = f"TK{datetime.now().strftime('%Y%m%d%H%m%S')}"
-        logger.info(f"Transfer to human: {reason}")
+        result = create_transfer_ticket(
+            user_id=user_id,
+            phone=phone,
+            session_id=session_id or "",
+            reason=reason,
+            summary=conversation_summary,
+        )
 
-        result = f"""已为您创建转接工单，工单号: {ticket_id}
+        ticket_id = result["ticket_id"]
+        logger.info(f"Transfer to human: {ticket_id}")
+
+        return f"""已为您创建转接工单，工单号: {ticket_id}
 转接原因: {reason}
 请稍候，人工客服将尽快为您服务。
 人工客服工作时间: 周一至周五 9:00-18:00
 客服热线: 400-990-5898"""
-
-        if conversation_summary:
-            result += f"\n\n对话摘要: {conversation_summary[:100]}"
-
-        return result
 
     except Exception as e:
         return handle_tool_error("transfer_to_human", e)

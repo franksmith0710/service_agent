@@ -222,14 +222,6 @@ def get_order_by_phone(phone: str) -> List[Dict[str, Any]]:
     return [_format_order(r) for r in results]
 
 
-def get_orders_by_user_id(user_id: str) -> List[Dict[str, Any]]:
-    """根据用户ID查询订单"""
-    results = execute_query(
-        "SELECT * FROM orders WHERE user_id = %s ORDER BY created_at DESC", (user_id,)
-    )
-    return [_format_order(r) for r in results]
-
-
 def _format_order(r: Dict[str, Any]) -> Dict[str, Any]:
     """格式化订单数据（支持多商品）"""
     return {
@@ -248,21 +240,6 @@ def _format_order(r: Dict[str, Any]) -> Dict[str, Any]:
         "pay_method": r.get("pay_method"),
         "shipping_address": r.get("shipping_address"),
     }
-
-
-def get_order_items_by_id(order_id: str) -> List[Dict[str, Any]]:
-    """获取订单的所有商品"""
-    results = execute_query(
-        "SELECT item_name, quantity, price FROM orders WHERE order_id = %s", (order_id,)
-    )
-    return [
-        {
-            "name": r["item_name"],
-            "quantity": r["quantity"],
-            "price": _to_float(r["price"]),
-        }
-        for r in results
-    ]
 
 
 def search_orders(keyword: str) -> List[Dict[str, Any]]:
@@ -297,4 +274,92 @@ def get_logistics_by_order(order_id: str) -> Optional[Dict[str, Any]]:
         "status": r["status"],
         "current_location": r.get("current_location"),
         "trace": trace or [],
+    }
+
+
+def create_transfer_ticket(
+    user_id: Optional[str],
+    phone: Optional[str],
+    session_id: str,
+    reason: str,
+    summary: Optional[str] = None,
+) -> Dict[str, Any]:
+    """创建转人工工单"""
+    import time
+    ticket_id = f"TK{int(time.time() * 1000)}"
+
+    execute_update(
+        """INSERT INTO transfer_tickets 
+           (ticket_id, user_id, phone, session_id, reason, summary, status, created_at, updated_at)
+           VALUES (%s, %s, %s, %s, %s, %s, 'pending', NOW(), NOW())""",
+        (ticket_id, user_id, phone, session_id, reason, summary),
+    )
+
+    logger.info(f"Created transfer ticket: {ticket_id}")
+    return {"ticket_id": ticket_id, "status": "pending"}
+
+
+def get_ticket_by_id(ticket_id: str) -> Optional[Dict[str, Any]]:
+    """根据工单号查询工单"""
+    results = execute_query(
+        "SELECT * FROM transfer_tickets WHERE ticket_id = %s", (ticket_id,)
+    )
+    if not results:
+        return None
+    return _format_ticket(results[0])
+
+
+def get_tickets_by_status(
+    status: str = "pending", limit: int = 50
+) -> List[Dict[str, Any]]:
+    """根据状态查询工单列表"""
+    results = execute_query(
+        """SELECT * FROM transfer_tickets 
+           WHERE status = %s 
+           ORDER BY created_at DESC 
+           LIMIT %s""",
+        (status, limit),
+    )
+    return [_format_ticket(r) for r in results]
+
+
+def get_all_tickets(limit: int = 50) -> List[Dict[str, Any]]:
+    """查询所有工单"""
+    results = execute_query(
+        """SELECT * FROM transfer_tickets 
+           ORDER BY created_at DESC 
+           LIMIT %s""",
+        (limit,),
+    )
+    return [_format_ticket(r) for r in results]
+
+
+def update_ticket_status(ticket_id: str, status: str) -> bool:
+    """更新工单状态"""
+    valid_statuses = ["pending", "processing", "resolved"]
+    if status not in valid_statuses:
+        logger.warning(f"Invalid status: {status}")
+        return False
+
+    rowcount = execute_update(
+        """UPDATE transfer_tickets 
+           SET status = %s, updated_at = NOW() 
+           WHERE ticket_id = %s""",
+        (status, ticket_id),
+    )
+    return rowcount > 0
+
+
+def _format_ticket(r: Dict[str, Any]) -> Dict[str, Any]:
+    """格式化工单数据"""
+    return {
+        "ticket_id": r["ticket_id"],
+        "user_id": r.get("user_id"),
+        "phone": r.get("phone"),
+        "session_id": r.get("session_id"),
+        "reason": r["reason"],
+        "summary": r.get("summary"),
+        "status": r["status"],
+        "created_at": _format_datetime(r.get("created_at")),
+        "updated_at": _format_datetime(r.get("updated_at")),
     }

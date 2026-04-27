@@ -23,6 +23,7 @@ from .prompts import (
     GREETINGS,
     THANKS,
     TRANSFER_KEYWORDS,
+    ORDER_LOGISTICS_KEYWORDS,
 )
 
 logger = get_logger(__name__)
@@ -99,9 +100,9 @@ def llm_dispatch_by_mini_model(state: AgentState) -> DispatchResult:
             return DispatchResult(
                 need_rag=False,
                 need_tool=False,
-                need_clarify=True,
+                need_clarify=False,
                 tool_calls=[],
-                clarify_prompt="我仅提供机械革命产品、售后、订单、物流相关咨询服务，暂不支持闲聊",
+                clarify_prompt="",
             )
 
         return _parse_dispatch_result(response.content)
@@ -111,9 +112,9 @@ def llm_dispatch_by_mini_model(state: AgentState) -> DispatchResult:
         return DispatchResult(
             need_rag=False,
             need_tool=False,
-            need_clarify=True,
+            need_clarify=False,
             tool_calls=[],
-            clarify_prompt="我仅提供机械革命产品、售后、订单、物流相关咨询服务，暂不支持闲聊",
+            clarify_prompt="",
         )
 
 
@@ -167,7 +168,7 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
             )
 
         # ====== 规则 2：提到订单/物流但缺少信息 → 追问 ======
-        if any(k in user_input_lower for k in ["订单", "物流", "查单", "快递"]):
+        if any(k in user_input_lower for k in ORDER_LOGISTICS_KEYWORDS):
             return DispatchResult(
                 need_clarify=True,
                 clarify_prompt="请提供您的订单号或手机号，以便为您查询",
@@ -226,41 +227,12 @@ def llm_dispatch(state: AgentState) -> DispatchResult:
     except Exception as e:
         logger.error(f"规则调度异常: {e}")
         return DispatchResult(
-            need_rag=True,
+            need_rag=False,
             need_tool=False,
-            need_clarify=False,
+            need_clarify=True,
             tool_calls=[],
-            clarify_prompt=""
+            clarify_prompt="我仅提供机械革命产品、售后、订单、物流相关咨询服务，暂不支持闲聊"
         )
-
-
-def get_routes_from_dispatch(dispatch_result: DispatchResult) -> List[str]:
-    """从调度结果获取路由列表"""
-    routes = []
-
-    if dispatch_result.need_clarify:
-        return ["clarify"]
-
-    if dispatch_result.need_rag:
-        routes.append("rag")
-
-    if dispatch_result.need_tool:
-        routes.append("agent")
-
-    if not routes:
-        routes.append("chat")
-
-    return routes
-
-
-def get_rag_filter_from_intent(intent: str) -> Optional[dict]:
-    """根据意图获取 RAG filter"""
-    filter_map = {
-        "product": {"type": "product"},
-        "pre_sales": {"type": "pre_sales"},
-        "after_sales": {"type": "after_sales"},
-    }
-    return filter_map.get(intent)
 
 
 def extract_order_id(text: str) -> Optional[str]:

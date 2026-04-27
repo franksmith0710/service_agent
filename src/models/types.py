@@ -6,7 +6,7 @@
 
 from typing import TypedDict, Annotated, Optional, Dict, Any, List
 from langchain_core.messages import BaseMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 def add_messages(left: list, right: list) -> list:

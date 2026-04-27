@@ -38,11 +38,26 @@ CREATE TABLE IF NOT EXISTS logistics (
 
 
 
+-- 转人工工单表
+CREATE TABLE IF NOT EXISTS transfer_tickets (
+    ticket_id VARCHAR(20) PRIMARY KEY,
+    user_id VARCHAR(50),
+    phone VARCHAR(20),
+    session_id VARCHAR(50),
+    reason VARCHAR(200) NOT NULL,
+    summary TEXT,
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_user_phone ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_logistics_order_id ON logistics(order_id);
+CREATE INDEX IF NOT EXISTS idx_transfer_tickets_status ON transfer_tickets(status);
+CREATE INDEX IF NOT EXISTS idx_transfer_tickets_created_at ON transfer_tickets(created_at DESC);
 
 
 -- 插入测试数据
@@ -71,4 +86,6 @@ SELECT 'Users:' AS info, COUNT(*) AS count FROM users
 UNION ALL
 SELECT 'Orders:', COUNT(*) FROM orders
 UNION ALL
-SELECT 'Logistics:', COUNT(*) FROM logistics;
+SELECT 'Logistics:', COUNT(*) FROM logistics
+UNION ALL
+SELECT 'Transfer Tickets:', COUNT(*) FROM transfer_tickets;

@@ -8,12 +8,10 @@ Agent 核心服务模块
 """
 
 import os
-import json
 import logging
 from typing import Generator
 
 from langchain_core.messages import (
-    BaseMessage,
     HumanMessage,
     AIMessage,
     SystemMessage,
@@ -44,9 +42,7 @@ from src.services.prompts import (
     GENERATION_SYSTEM_PROMPT,
 )
 from src.services.rag import get_rag
-import warnings
-warnings.filterwarnings("ignore")
-import logging
+
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logger = get_logger(__name__)
 
@@ -135,6 +131,15 @@ def check_slots_node(state: AgentState) -> AgentState:
     槽位校验
     订单/物流必须有 order_id 或 phone，没有 → 强制追问
     """
+    if state.get("need_clarify"):
+        clarify_prompt = state.get("clarify_prompt", CLARIFY_ORDER)
+        return {
+            "need_clarify": True,
+            "clarify_prompt": clarify_prompt,
+            "step": "clarify",
+            "next_step": "end"
+        }
+
     intent = state.get("intent", "")
     slots = state.get("slots", {})
 
@@ -173,13 +178,13 @@ def summary_node(state: AgentState) -> AgentState:
     tool_results = state.get("tool_results", [])
     rag_docs = state.get("rag_docs", [])
 
-    # 脱敏函数
+    # 脱敏函数（强制截断，单段最多 500 字符）
     def mask_sensitive(text):
         import re
         text = str(text)
         text = re.sub(r"1[3-9]\d{9}", "1**********", text)
         text = re.sub(r"\d{10,}", "**********", text)
-        return text
+        return text[:500]
 
     # 1. 先脱敏
     masked_tools = [
@@ -193,8 +198,8 @@ def summary_node(state: AgentState) -> AgentState:
         unique_tools[item["name"]] = item
     masked_tools = list(unique_tools.values())
 
-    # 3. RAG 依旧封顶截断
-    rag_final = rag_docs[:2]
+    # 3. RAG 文档去重（取前 2 条）
+    rag_final = [doc for doc in rag_docs[:2]]
 
     # 直接返回全新结果，覆盖旧 state，不再拼接冗余
     return {
@@ -396,6 +401,7 @@ def run_agent(
     need_tool = dispatch_result.need_tool
     need_clarify = dispatch_result.need_clarify
     tool_calls = dispatch_result.tool_calls
+    clarify_prompt = dispatch_result.clarify_prompt
 
     logger.info(
         f"LLM dispatch: need_rag={need_rag}, need_tool={need_tool}, "
@@ -426,6 +432,10 @@ def run_agent(
         args = tc.get("args", {})
         if args:
             tool_slots.update(args)
+        if tc.get("name") == "transfer_to_human":
+            args["user_id"] = saved_slots.get("user_id")
+            args["phone"] = saved_slots.get("phone")
+            args["session_id"] = session_id
 
     merged_slots = {**saved_slots, **tool_slots, **user_slots}
     new_context_entity = update_context_entity(merged_slots, saved_context_entity)
@@ -447,6 +457,7 @@ def run_agent(
         "tool_calls": tool_calls,
         "need_rag": need_rag,
         "need_clarify": need_clarify,
+        "clarify_prompt": clarify_prompt,
 
         # ========== 新增循环默认值 ==========
         "tool_queue": tool_calls,     # 调度返回的工具全部扔进待执行队列
