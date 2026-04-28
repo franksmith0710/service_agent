@@ -10,13 +10,12 @@ class TestConfig:
         config = load_config()
         assert isinstance(config, AppConfig)
         assert config.llm_provider == "siliconflow"
-        assert config.llm.model == "deepseek-r1:1.5b"
 
-    def test_llm_config(self):
-        """测试 LLM 配置"""
+    def test_siliconflow_config(self):
+        """测试 SiliconFlow 配置"""
         config = load_config()
-        assert config.llm.temperature == 0.7
-        assert config.llm.base_url == "http://localhost:11434"
+        assert config.siliconflow.model is not None
+        assert config.siliconflow.api_key is not None
 
 
 class TestTools:

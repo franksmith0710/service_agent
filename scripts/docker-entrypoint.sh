@@ -15,7 +15,23 @@ RETRY_INTERVAL=2
 # 1. 等待 PostgreSQL 就绪
 echo "[1/4] 等待 PostgreSQL 就绪..."
 retries=0
-until PGPASSWORD="${POSTGRES_PASSWORD:-postgres}" psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-kefu_agent" -c '\q' 2>/dev/null; do
+until python -c "
+import psycopg2
+import os
+try:
+    conn = psycopg2.connect(
+        host=os.getenv('POSTGRES_HOST', 'db'),
+        port=os.getenv('POSTGRES_PORT', '5432'),
+        user=os.getenv('POSTGRES_USER', 'postgres'),
+        password=os.getenv('POSTGRES_PASSWORD', 'postgres'),
+        dbname=os.getenv('POSTGRES_DB', 'kefu_agent')
+    )
+    conn.close()
+    print('Connected')
+except Exception as e:
+    print(f'Error: {e}')
+    exit(1)
+" 2>/dev/null | grep -q "Connected"; do
     retries=$((retries + 1))
     if [ $retries -ge $MAX_RETRIES ]; then
         echo "错误: PostgreSQL 连接超时"
@@ -40,10 +56,21 @@ until curl -s "$OLLAMA_BASE_URL/api/version" > /dev/null 2>&1; do
 done
 echo "  Ollama 已就绪"
 
+# 2.5 检查并拉取嵌入模型（通过 Ollama HTTP API）
+echo "[2.5/4] 检查嵌入模型..."
+EMBEDDING_MODEL="${EMBEDDING_MODEL:-bge-m3}"
+if ! curl -s "$OLLAMA_BASE_URL/api/tags" | grep -q "\"name\":\"$EMBEDDING_MODEL\""; then
+    echo "  正在拉取嵌入模型: $EMBEDDING_MODEL ..."
+    curl -X POST "$OLLAMA_BASE_URL/api/pull" -d "{\"name\":\"$EMBEDDING_MODEL\"}" --no-buffer
+    echo "  嵌入模型拉取完成"
+else
+    echo "  嵌入模型已存在: $EMBEDDING_MODEL"
+fi
+
 # 3. 检查并初始化知识库
 echo "[3/4] 检查知识库..."
 cd /app
-python3 -c "
+python -c "
 import sys
 sys.path.insert(0, '/app')
 from src.services.rag import get_rag, init_from_files

@@ -11,25 +11,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
-@dataclass
-class LLMConfig:
-    """LLM 配置"""
-
-    provider: str = "ollama"
-    model: str = "deepseek-r1:1.5b"
-    temperature: float = 0.7
-    base_url: str = "http://localhost:11434"
-    api_key: str = "ollama"
-
-
 @dataclass
 class SiliconFlowConfig:
     """SiliconFlow 配置"""
 
     base_url: str = "https://api.siliconflow.cn/v1"
     api_key: Optional[str] = None
-    model: str = "Qwen/Qwen3.5-9B"
+    model: str = "deepseek-ai/DeepSeek-V3"
     dispatch_model: str = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
 
 
@@ -39,8 +27,6 @@ class LangSmithConfig:
 
     api_key: Optional[str] = None
     project_name: str = "kefu-agent"
-
-
 
 
 
@@ -83,8 +69,7 @@ class ToolsConfig:
 class AppConfig:
     """应用全局配置"""
 
-    llm_provider: str = "ollama"
-    llm: LLMConfig = field(default_factory=LLMConfig)
+    llm_provider: str = "siliconflow"
     siliconflow: SiliconFlowConfig = field(default_factory=SiliconFlowConfig)
     langsmith: LangSmithConfig = field(default_factory=LangSmithConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
@@ -97,12 +82,6 @@ def load_config() -> AppConfig:
     """从环境变量加载配置"""
     return AppConfig(
         llm_provider="siliconflow",
-        llm=LLMConfig(
-            provider="ollama",
-            model="deepseek-r1:1.5b",
-            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-            api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
-        ),
         siliconflow=SiliconFlowConfig(
             base_url=os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"),
             api_key=os.getenv("SILICONFLOW_API_KEY"),

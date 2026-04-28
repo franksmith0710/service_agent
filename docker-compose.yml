@@ -5,17 +5,17 @@ services:
     image: ollama/ollama:latest
     container_name: kefu_ollama
     ports:
-      - "11434:11434"
+      - "11435:11434"
     volumes:
       - ./data/ollama:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/version"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/11434'"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 60s
+      retries: 10
+      start_period: 3m
     networks:
       - kefu_network
 
@@ -40,6 +40,7 @@ services:
       - kefu_network
 
   app:
+    image: kefu_agent:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -49,7 +50,7 @@ services:
       - "8501:8501"
     volumes:
       - ./data/chroma:/app/chroma_db
-      - ./data/kb:/app/data
+      - ./data:/app/data
       - ./.env:/app/.env:ro
     env_file:
       - .env

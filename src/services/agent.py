@@ -210,7 +210,7 @@ def summary_node(state: AgentState) -> AgentState:
     }
 
 
-MAX_TURNS = 8
+MAX_TURNS = 10
 
 
 @safe_node
