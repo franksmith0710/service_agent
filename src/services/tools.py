@@ -13,7 +13,6 @@ from src.services.postgres import (
     get_order_by_id,
     get_order_by_phone,
     get_logistics_by_order,
-    get_user_by_id,
     get_user_by_phone,
     search_orders,
     create_transfer_ticket,

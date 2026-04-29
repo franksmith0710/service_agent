@@ -187,10 +187,6 @@ class KnowledgeBase:
 
         self._initialized = True
 
-    def get_retriever(self, search_kwargs: Optional[dict] = None):
-        self.initialize()
-        return self.vector_store.as_retriever(search_kwargs=search_kwargs or {"k": 3})
-
     def add_documents(self, documents: list[Document]) -> None:
         self.initialize()
         self.vector_store.add_documents(documents)

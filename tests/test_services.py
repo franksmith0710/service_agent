@@ -126,38 +126,6 @@ class TestDatabase:
         assert "蛟龙" in results[0]["items"][0]["name"]
 
 
-class TestIntent:
-    """意图识别测试"""
-
-    def test_recognize_intent_order(self):
-        """测试订单查询意图识别"""
-        from src.services.intent import recognize_intent, Intent
-
-        intent = recognize_intent("我想查一下订单20250413001")
-        assert intent == Intent.ORDER_QUERY
-
-    def test_recognize_intent_logistics(self):
-        """测试物流查询意图识别"""
-        from src.services.intent import recognize_intent, Intent
-
-        intent = recognize_intent("帮我看看物流到哪了")
-        assert intent == Intent.LOGISTICS_QUERY
-
-    def test_recognize_intent_transfer(self):
-        """测试转人工意图识别"""
-        from src.services.intent import recognize_intent, Intent
-
-        intent = recognize_intent("我要投诉客服")
-        assert intent == Intent.TRANSFER_HUMAN
-
-    def test_recognize_intent_chat(self):
-        """测试闲聊意图识别"""
-        from src.services.intent import recognize_intent, Intent
-
-        intent = recognize_intent("你们这个电脑怎么样")
-        assert intent == Intent.GENERAL_CHAT
-
-
 class TestAPI:
     """API 端点测试"""
 

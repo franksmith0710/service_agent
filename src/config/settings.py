@@ -33,7 +33,6 @@ class LangSmithConfig:
 @dataclass
 class EmbeddingConfig:
     """嵌入模型配置"""
-
     model: str = "bge-m3"
     base_url: str = "http://localhost:11434"
 
@@ -41,7 +40,6 @@ class EmbeddingConfig:
 @dataclass
 class ChromaConfig:
     """Chroma 向量库配置"""
-
     persist_directory: str = "./data/chroma"
 
 
@@ -62,20 +60,19 @@ class ToolsConfig:
 
     enabled: list[str] = field(
         default_factory=lambda: ["query_order", "query_logistics", "transfer_to_human"]
-    )
+        )
+
 
 
 @dataclass
 class AppConfig:
     """应用全局配置"""
-
     llm_provider: str = "siliconflow"
     siliconflow: SiliconFlowConfig = field(default_factory=SiliconFlowConfig)
     langsmith: LangSmithConfig = field(default_factory=LangSmithConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     chroma: ChromaConfig = field(default_factory=ChromaConfig)
     postgres: PostgresConfig = field(default_factory=PostgresConfig)
-    tools: ToolsConfig = field(default_factory=ToolsConfig)
 
 
 def load_config() -> AppConfig:
@@ -105,13 +102,6 @@ def load_config() -> AppConfig:
             user=os.getenv("POSTGRES_USER", "postgres"),
             password=os.getenv("POSTGRES_PASSWORD", "postgres"),
             database=os.getenv("POSTGRES_DB", "kefu_agent"),
-        ),
-        tools=ToolsConfig(
-            enabled=[
-                "query_order",
-                "query_logistics",
-                "transfer_to_human",
-            ]
         ),
     )
 

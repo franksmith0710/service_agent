@@ -30,6 +30,7 @@ RUN mkdir -p /app/data/chroma /app/logs
 
 # Make scripts executable
 RUN chmod +x /app/scripts/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /app/scripts/docker-entrypoint.sh
 
 # Expose ports
 EXPOSE 8000 8501

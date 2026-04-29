@@ -13,7 +13,6 @@ from typing import Generator
 
 from langchain_core.messages import (
     HumanMessage,
-    AIMessage,
     SystemMessage,
 )
 
@@ -367,7 +366,7 @@ def run_agent(
     prev_turn_count = memory.get_turn_count()
 
     if prev_turn_count >= MAX_TURNS:
-        yield "对话已达最大轮次(8轮)，为保证服务质量已为您转接人工客服。\n人工客服工作时间: 周一至周五 9:00-18:00\n客服热线: 400-990-5898"
+        yield "对话已达最大轮次(10轮)，为保证服务质量已为您转接人工客服。\n人工客服工作时间: 周一至周五 9:00-18:00\n客服热线: 400-990-5898"
         memory.clear()
         memory.set_session_status("idle")
         memory.increment_turn()

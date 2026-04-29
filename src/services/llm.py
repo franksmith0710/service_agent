@@ -82,7 +82,3 @@ def get_llm() -> BaseChatModel:
 def get_llm_for_generation() -> BaseChatModel:
     """生成模型 - 永远不带工具，只生成文字回答"""
     return _llm_manager.get_llm_for_generation()
-
-
-def reset_llm():
-    _llm_manager.reset()

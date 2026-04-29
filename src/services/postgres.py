@@ -92,15 +92,6 @@ def get_cursor():
             return_connection(conn)
 
 
-def close_pool():
-    """关闭连接池"""
-    global _connection_pool
-    if _connection_pool:
-        _connection_pool.closeall()
-        _connection_pool = None
-        logger.info("PostgreSQL pool closed")
-
-
 def execute_query(
     query: str, params: tuple = None, timeout: int = 10
 ) -> List[Dict[str, Any]]:
@@ -155,21 +146,6 @@ def _format_datetime(dt) -> Optional[str]:
 def get_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
     """根据手机号查询用户"""
     results = execute_query("SELECT * FROM users WHERE phone = %s", (phone,))
-    if not results:
-        return None
-    r = results[0]
-    return {
-        "user_id": r["user_id"],
-        "username": r["username"],
-        "phone": r["phone"],
-        "membership": r.get("membership"),
-        "points": r.get("points", 0),
-    }
-
-
-def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
-    """根据用户ID查询用户"""
-    results = execute_query("SELECT * FROM users WHERE user_id = %s", (user_id,))
     if not results:
         return None
     r = results[0]

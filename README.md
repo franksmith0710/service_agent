@@ -197,7 +197,7 @@ uvicorn api:app --reload
 # 或同时启动（需要两个终端）
 ```
 
-### 方式二：Docker 部署（推荐）
+### 方式二：Docker 部署
 
 #### 1. 配置环境变量
 
@@ -638,4 +638,3 @@ docker-compose up -d --build
 ```
 
 ---
-
