@@ -61,7 +61,7 @@ async def root():
     return {
         "message": "智能客服 API",
         "version": "1.0.0",
-        "dispatch_model": "deepseek-r1:1.5b",
+        "dispatch_model": config.siliconflow.dispatch_model,
         "generation_provider": "siliconflow",
         "generation_model": config.siliconflow.model,
     }

@@ -46,8 +46,8 @@ services:
       dockerfile: Dockerfile
     container_name: kefu_app
     ports:
-      - "8000:8000"
-      - "8501:8501"
+      - "9090:8000"
+      - "9091:8501"
     volumes:
       - ./data/chroma:/app/chroma_db
       - ./data:/app/data

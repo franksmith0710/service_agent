@@ -104,7 +104,7 @@ def main():
 
         st.markdown("---")
         st.header("配置信息")
-        st.markdown(f"- 调度模型: `deepseek-r1:1.5b`")
+        st.markdown(f"- 调度模型: `{config.siliconflow.dispatch_model}`")
         st.markdown(f"- 生成模型: `{config.siliconflow.model}`")
         st.markdown(f"- 知识库: `{config.chroma.persist_directory}`")
 
