@@ -163,9 +163,14 @@ LANGCHAIN_PROJECT=kefu-agent
 
 ### 3. 初始化数据库
 
+数据库表结构参考 `docs/init_db.sql.example`。如果重新创建 PostgreSQL 容器，可以手动执行：
+
 ```bash
-psql -U postgres -d kefu_agent -f init_db.sql
+# 恢复示例文件
+psql -U postgres -d kefu_agent -f docs/init_db.sql.example
 ```
+
+> **注意**：本项目的 PostgreSQL 数据已持久化在 `./data/postgres` 中，通常无需重新初始化。
 
 ### 4. 初始化知识库
 
