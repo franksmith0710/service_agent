@@ -13,6 +13,7 @@ build/
 # 数据
 chroma_db/
 data/chroma/
+data/postgres/
 *.sqlite3
 
 # 缓存
