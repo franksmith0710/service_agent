@@ -54,13 +54,6 @@ class PostgresConfig:
     database: str = "kefu_agent"
 
 
-@dataclass
-class ToolsConfig:
-    """工具配置"""
-
-    enabled: list[str] = field(
-        default_factory=lambda: ["query_order", "query_logistics", "transfer_to_human"]
-        )
 
 
 
